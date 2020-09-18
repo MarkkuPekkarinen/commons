@@ -20,7 +20,7 @@
   <parent>
       <groupId>org.openidentityplatform.commons</groupId>
       <artifactId>commons</artifactId>
-      <version>2.0.7-SNAPSHOT</version>
+      <version>2.0.8-SNAPSHOT</version>
   </parent>
 
  <artifactId>doc-maven-plugin</artifactId>
@@ -31,7 +31,6 @@
  
  <properties>
 
-  <jsonFluentVersion>${project.version}</jsonFluentVersion>
   <mavenVersion>3.3.1</mavenVersion>
   <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
@@ -148,7 +147,6 @@
   <dependency>
    <groupId>org.openidentityplatform.commons</groupId>
    <artifactId>json-fluent</artifactId>
-   <version>${jsonFluentVersion}</version>
   </dependency>
 
   <dependency>
