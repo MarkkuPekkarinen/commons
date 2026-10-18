@@ -20,6 +20,7 @@
  * with the fields enclosed by brackets [] replaced by
  * your own identifying information:
  * "Portions Copyrighted [year] [name of copyright owner]"
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.commons.launcher;
@@ -47,6 +48,7 @@ import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -144,6 +146,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
     public OSGiFrameworkService() {
 
         propertyAccessor = new PropertyAccessor() {
+            @Override
             public <T> T get(String name) {
                 Object value = null;
                 if (null != bootParameters) {
@@ -173,6 +176,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         };
 
         transformer = new JsonTransformer() {
+            @Override
             public void transform(JsonValue value) throws JsonException {
                 if (null != value && value.isString()) {
                     value.setObject(ConfigurationUtil.substVars(value.asString(), propertyAccessor));
@@ -221,6 +225,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         this.configFile = configFile;
     }
 
+    @Override
     protected boolean isVerbose() {
         return verbose;
     }
@@ -248,6 +253,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         this.bootParameters = bootParameters;
     }
 
+    @Override
     public boolean isNewThread() {
         return newThread;
     }
@@ -257,11 +263,13 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         newThread = value;
     }
 
+    @Override
     protected long getStopTimeout() {
         return 0;
     }
 
     @SuppressWarnings({ "unchecked" })
+    @Override
     public void init(String[] arguments) throws Exception {
         CmdLineParser parser = new CmdLineParser(this);
 
@@ -291,14 +299,17 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         init();
     }
 
+    @Override
     public void destroy() {
 
     }
 
+    @Override
     public Bundle getSystemBundle() {
         return getFramework();
     }
 
+    @Override
     public void init() throws Exception {
         if (null == bootParameters) {
             bootParameters = new HashMap<String, Object>();
@@ -333,14 +344,13 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
                             		   );
                 }
             } else {
-                input =
-                        new BufferedReader(new InputStreamReader(Main.class
-                                .getResourceAsStream("/launcher.json")));
-                if (null == input) {
+                final InputStream configStream = Main.class.getResourceAsStream("/launcher.json");
+                if (null == configStream) {
                     throw new IllegalArgumentException(
                             "Boot OSGi configuration file does not exists on CLASSPATH: "
                                     + Main.class.getResource("/").toString() + "/launcher.json");
                 }
+                input = new BufferedReader(new InputStreamReader(configStream));
             }
             launcherConfiguration = new JsonValue((new JSONParser()).parse(input));
             launcherConfiguration.getTransformers().add(transformer);
@@ -387,6 +397,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
                 || ((enableHook instanceof String) && !((String) enableHook)
                         .equalsIgnoreCase("false"))) {
             Runtime.getRuntime().addShutdownHook(new Thread("Felix Shutdown Hook") {
+                @Override
                 public void run() {
                     try {
                         OSGiFrameworkService.this.stop();
@@ -401,6 +412,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
 
     }
 
+    @Override
     protected void registerServices(BundleContext bundleContext) throws Exception {
         Dictionary<String, String> properties = new Hashtable<String, String>(4);
         properties.put(Constants.SERVICE_VENDOR, "Open Identity Platform Community");
@@ -411,6 +423,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
                 properties);
     }
 
+    @Override
     protected Map<String, String> getConfigurationProperties() {
         if (null == configurationProperties) {
             configurationProperties = new HashMap<String, String>();
@@ -434,6 +447,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
         this.launcherConfiguration = launcherConfiguration;
     }
 
+    @Override
     protected List<BundleHandler> listBundleHandlers(BundleContext context)
             throws MalformedURLException {
         JsonValue bundle = getLauncherConfiguration().get("bundle");
@@ -480,7 +494,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
                     for (BundleHandler handler : result) {
                         if (newHandler.getBundleUrl().equals(handler.getBundleUrl())) {
                             if (newHandler.getActions().equals(handler.getActions())
-                                    && newHandler.getStartLevel() == newHandler.getStartLevel()) {
+                                    && Objects.equals(newHandler.getStartLevel(), handler.getStartLevel())) {
                                 // Do not duplicate
                                 newHandler = null;
                                 break;
@@ -504,10 +518,10 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
     /**
      * <p>
      * Loads the properties in the system property file associated with the
-     * framework installation into <tt>System.setProperty()</tt>. These
+     * framework installation into <code>System.setProperty()</code>. These
      * properties are not directly used by the framework in anyway. By default,
-     * the system property file is located in the <tt>conf/</tt> directory and
-     * is called "<tt>system.properties</tt>".
+     * the system property file is located in the <code>conf/</code> directory and
+     * is called "<code>system.properties</code>".
      * </p>
      */
     protected void loadSystemProperties(JsonValue configuration, URI projectDirectory) {
@@ -545,11 +559,11 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
      * associated with the framework installation; these properties are
      * accessible to the framework and to bundles and are intended for
      * configuration purposes. By default, the configuration property file is
-     * located in the <tt>conf/</tt> directory and is called "
-     * <tt>config.properties</tt>".
+     * located in the <code>conf/</code> directory and is called "
+     * <code>config.properties</code>".
      * </p>
      * 
-     * @return A <tt>Map<String, Object></tt> instance or <tt>null</tt> if there
+     * @return A <code>Map&lt;String, Object&gt;</code> instance or <code>null</code> if there
      *         was an error.
      */
     protected Map<String, String> loadConfigProperties(JsonValue configuration, URI projectDirectory) {
@@ -581,11 +595,11 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
      * Loads the boot properties in the configuration property file associated
      * with the framework installation; these properties are accessible to the
      * framework and to bundles and are intended for configuration purposes. By
-     * default, the configuration property file is located in the <tt>conf/</tt>
-     * directory and is called " <tt>config.properties</tt>".
+     * default, the configuration property file is located in the <code>conf/</code>
+     * directory and is called " <code>config.properties</code>".
      * </p>
      * 
-     * @return A <tt>Map<String, Object></tt> instance or <tt>null</tt> if there
+     * @return A <code>Map&lt;String, Object&gt;</code> instance or <code>null</code> if there
      *         was an error.
      */
     protected Map<String, Object> loadBootProperties(JsonValue configuration, URI projectDirectory) {
@@ -613,7 +627,7 @@ public class OSGiFrameworkService extends AbstractOSGiFrameworkService {
             File pFile = new File(propertyFile);
             if (!pFile.isAbsolute()) {
                 is =
-                        projectDirectory.resolve(propertyFile.toString()).toURL().openConnection()
+                        projectDirectory.resolve(propertyFile).toURL().openConnection()
                                 .getInputStream();
             } else {
                 is =  pFile.toURI().toURL().openConnection().getInputStream();

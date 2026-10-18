@@ -12,6 +12,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit;
@@ -170,7 +171,7 @@ class MVV {
             return overheadLength(2) + targetLength + newVersionLength;
         } else {
             int offset = targetOffset + 1;
-            while (offset < targetLength) {
+            while (offset < targetOffset + targetLength) {
                 final long version = getVersion(target, offset);
                 final int valueLength = getLength(target, offset);
                 offset += LENGTH_PER_VERSION + valueLength;
@@ -294,7 +295,7 @@ class MVV {
          * Value previously existed as a primordial value. Result will be an MVV
          * with two versions.
          */
-        else if (target[0] != TYPE_MVV_BYTE) {
+        else if (target[targetOffset] != TYPE_MVV_BYTE) {
             assertCapacity(targetLimit, targetOffset + sourceLength + targetLength + overheadLength(2));
             // Promote to MVV, shift existing down for header
             System.arraycopy(target, to, target, to + LENGTH_TYPE_MVV + LENGTH_PER_VERSION, targetLength);
@@ -380,7 +381,13 @@ class MVV {
      * </p>
      * <p>
      * This method leaves the byte array unchanged if any of its checked
-     * Exceptions is thrown.
+     * Exceptions is thrown, with one exception: on a well-formed MVV, stale
+     * mark bits left on disk by a prune interrupted before the issue #286 fix
+     * are cleared up front regardless of outcome (issue #292). Mark bits are
+     * transient state private to this method and invisible to the read paths,
+     * so clearing them repairs the corruption without altering any version's
+     * value. A malformed MVV is never swept — it is rejected with a
+     * <code>CorruptValueException</code> and left unchanged.
      * </p>
      * <p>
      * This method adds {@link PrunedVersion} instances to the supplied list.
@@ -419,7 +426,8 @@ class MVV {
             return length;
         }
 
-        Debug.$assert0.t(verify(bytes, offset, length));
+        final boolean wellFormed = verify(bytes, offset, length);
+        Debug.$assert0.t(wellFormed);
 
         boolean primordial = convertToPrimordial;
         int marked = 0;
@@ -436,6 +444,28 @@ class MVV {
             long lastVersionHandle = Long.MIN_VALUE;
             long lastVersionTc = UNCOMMITTED;
             long uncommittedTransactionTs = 0;
+            /*
+             * The passes below trust isMarked() while the marked counter only
+             * counts marks set by this run, so a stale mark left on disk by a
+             * prune interrupted before the issue #286 fix would win the
+             * primordial-conversion scan — promoting an obsolete version and
+             * silently dropping the current one with no PrunedVersion
+             * accounting (issue #292). Sweep the region clean before the
+             * first pass marks the real keepers. This is a separate pass, not
+             * an unmark() at the first pass's loop head, so the whole region
+             * is repaired even when that pass exits early via an exception.
+             * Only a well-formed region may be swept: a corrupt length field
+             * would misalign the traversal and unmark() would clear a bit
+             * inside a value payload. On a malformed region skip the sweep —
+             * the first pass's guard throws for it anyway.
+             */
+            if (wellFormed) {
+                int sweep = offset + 1;
+                while (sweep + LENGTH_PER_VERSION <= offset + length) {
+                    unmark(bytes, sweep);
+                    sweep += getLength(bytes, sweep) + LENGTH_PER_VERSION;
+                }
+            }
             /*
              * First pass - mark all the versions to keep. Keep every
              * UNCOMMITTED version (there may be more than one created by the
@@ -483,7 +513,13 @@ class MVV {
                     }
                 }
                 from += vlength + LENGTH_PER_VERSION;
-                if (from > offset + length) {
+                if (from != offset + length && from + LENGTH_PER_VERSION > offset + length) {
+                    /*
+                     * A version must either end exactly at the region end or
+                     * leave room for at least one more version header. Anything
+                     * else is a misaligned traversal; reject it before the next
+                     * iteration reads or marks outside the MVV region.
+                     */
                     throw new CorruptValueException("MVV Value is corrupt at index: " + from);
                 }
             }
@@ -577,17 +613,21 @@ class MVV {
             throw new PersistitInterruptedException(ie);
         } finally {
             /*
-             * Make sure all marks are removed even if this method exits via an
-             * Exception.
+             * Remove marks left by pass 1 even when this method exits via an
+             * exception: a mark left in a live page is read back as part of
+             * the version length and corrupts the MVV (issue #286). Mirrors
+             * pass 1 - same advance, same guard - so it touches exactly the
+             * indices that pass could have marked, and nothing else. A
+             * zero-length version is legal, hence no break on vlength == 0.
+             * The array-end bound covers pass 1's unguarded first iteration.
              */
             if (marked > 0) {
                 int index = offset + 1;
-                while (index < length) {
+                while (index + LENGTH_PER_VERSION <= bytes.length) {
                     final int vlength = getLength(bytes, index);
-                    Debug.$assert0.t(vlength + index + LENGTH_PER_VERSION <= offset + length);
                     unmark(bytes, index);
                     index += vlength + LENGTH_PER_VERSION;
-                    if (vlength <= 0) {
+                    if (index + LENGTH_PER_VERSION > offset + length) {
                         break;
                     }
                 }
@@ -612,6 +652,37 @@ class MVV {
             from += vlength + LENGTH_PER_VERSION;
         }
         return true;
+    }
+
+    /**
+     * Count versions whose length field still carries the mark bit. Marks are
+     * transient state private to {@link #prune} and must never be observable
+     * outside it; a non-zero count on a stored MVV means the value was
+     * corrupted by a prune interrupted before the issue #286 fix. The length
+     * accessors strip the mark bit silently, so such versions read normally
+     * and only this scan can detect them (issue #290).
+     *
+     * @param bytes
+     *            the byte array
+     * @param offset
+     *            the index of the first byte of the MVV within the byte array
+     * @param length
+     *            the count of bytes in the MVV
+     * @return the number of marked versions, 0 for a non-MVV value
+     */
+    static int countMarkedVersions(final byte[] bytes, final int offset, final int length) {
+        if (!isArrayMVV(bytes, offset, length)) {
+            return 0;
+        }
+        int marked = 0;
+        int from = offset + 1;
+        while (from + LENGTH_PER_VERSION <= offset + length) {
+            if (isMarked(bytes, from)) {
+                marked++;
+            }
+            from += getLength(bytes, from) + LENGTH_PER_VERSION;
+        }
+        return marked;
     }
 
     static boolean verify(final TransactionIndex ti, final byte[] bytes, final int offset, final int length) {
@@ -662,8 +733,12 @@ class MVV {
      *         if no value was copied.
      * @throws IllegalArgumentException
      *             If the target array is too small to hold the value
+     * @throws CorruptValueException
+     *             If a version header or value extends past
+     *             <code>sourceLength</code>
      */
-    public static int fetchVersion(final byte[] source, final int sourceLength, final long version, final byte[] target) {
+    public static int fetchVersion(final byte[] source, final int sourceLength, final long version, final byte[] target)
+            throws CorruptValueException {
         int offset = 0;
         int length = VERSION_NOT_FOUND;
 
@@ -672,9 +747,17 @@ class MVV {
         } else if (sourceLength > 0 && source[0] == TYPE_MVV_BYTE) {
             offset = 1;
             while (offset < sourceLength) {
-                final long curVersion = Util.getLong(source, offset);
-                final int curLength = Util.getShort(source, offset + LENGTH_VERSION);
+                if (offset + LENGTH_PER_VERSION > sourceLength) {
+                    throw new CorruptValueException("MVV version header at offset " + offset
+                            + " extends past length " + sourceLength);
+                }
+                final long curVersion = getVersion(source, offset);
+                final int curLength = getLength(source, offset);
                 offset += LENGTH_PER_VERSION;
+                if (curLength > sourceLength - offset) {
+                    throw new CorruptValueException("MVV version value at offset " + offset + " with length "
+                            + curLength + " extends past length " + sourceLength);
+                }
                 if (curVersion == version) {
                     length = curLength;
                     break;
@@ -738,15 +821,29 @@ class MVV {
         } else if (source[sourceOffset] != TYPE_MVV_BYTE) {
             visitor.sawVersion(PRIMORDIAL_VALUE_VERSION, sourceOffset, sourceLength);
         } else {
+            final int end = sourceOffset + sourceLength;
             int offset = sourceOffset + 1;
-            while (offset < sourceOffset + sourceLength) {
-                final long version = Util.getLong(source, offset);
-                final int valueLength = Util.getShort(source, offset + LENGTH_VERSION);
+            while (offset < end) {
+                if (offset + LENGTH_PER_VERSION > end) {
+                    throw new CorruptValueException("MVV version header at offset " + offset
+                            + " extends past offset/length=" + sourceOffset + "/" + sourceLength);
+                }
+                final long version = getVersion(source, offset);
+                final int valueLength = getLength(source, offset);
                 offset += LENGTH_PER_VERSION;
+                if (valueLength > end - offset) {
+                    throw new CorruptValueException("MVV version value at offset " + offset + " with length "
+                            + valueLength + " extends past offset/length=" + sourceOffset + "/" + sourceLength);
+                }
                 visitor.sawVersion(version, offset, valueLength);
                 offset += valueLength;
             }
-            if (offset != sourceOffset + sourceLength) {
+            /*
+             * Defensive only: the per-version guards above make this
+             * unreachable (the loop can only exit with offset == end). Kept in
+             * case the traversal logic changes.
+             */
+            if (offset != end) {
                 throw new CorruptValueException("invalid length in MVV at offset/length=" + sourceOffset + "/"
                         + sourceLength);
             }
@@ -772,14 +869,20 @@ class MVV {
      *         if no value was copied.
      * @throws IllegalArgumentException
      *             If the target array is too small to hold the value
+     * @throws CorruptValueException
+     *             If the stored value extends past <code>sourceLength</code>
      */
     public static int fetchVersionByOffset(final byte[] source, final int sourceLength, final int offset,
-            final byte[] target) {
+            final byte[] target) throws CorruptValueException {
         if (offset < 0 || (offset > 0 && offset > sourceLength)) {
             throw new IllegalArgumentException("Offset out of range: " + offset);
         }
-        final int length = (offset == 0) ? sourceLength : Util.getShort(source, offset - LENGTH_VALUE_LENGTH);
+        final int length = (offset == 0) ? sourceLength : getLength(source, offset - LENGTH_PER_VERSION);
         if (length > 0) {
+            if (length > sourceLength - offset) {
+                throw new CorruptValueException("MVV version value at offset " + offset + " with length " + length
+                        + " extends past length " + sourceLength);
+            }
             assertCapacity(target.length, length);
             System.arraycopy(source, offset, target, 0, length);
         }
@@ -790,8 +893,6 @@ class MVV {
      * Internal helper. Used to assert a given byte array is large enough before
      * writing.
      * 
-     * @param target
-     *            Array to check
      * @param length
      *            Length needed
      * @throws IllegalArgumentException

@@ -20,13 +20,14 @@
  * with the fields enclosed by brackets [] replaced by
  * your own identifying information:
  * "Portions Copyrighted [year] [name of copyright owner]"
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.script;
 
 /**
  * A ScriptName identifies a {@code Script} object.
- * <p/>
+ * <p>
  * Simple name can not identify a file in a Directory.
  *
  * @author Laszlo Hordos
@@ -99,6 +100,7 @@ public final class ScriptName {
         return result;
     }
 
+    @Override
     public String toString() {
         StringBuilder sb = new StringBuilder(name).append(':').append(type);
         if (null != revision) {

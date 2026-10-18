@@ -13,6 +13,7 @@
   ~ information: "Portions copyright [year] [name of copyright owner]".
   ~
   ~ Copyright 2016 ForgeRock AS.
+  ~ Portions copyright 2024 3A Systems LLC.
   -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -21,7 +22,7 @@
     <parent>
         <groupId>org.openidentityplatform.commons</groupId>
         <artifactId>commons</artifactId>
-        <version>2.1.2-SNAPSHOT</version>
+        <version>3.2.2-SNAPSHOT</version>
     </parent>
 
     <artifactId>selfservice</artifactId>
@@ -42,22 +43,16 @@
     </modules>
 
     <properties>
-        <javax.inject.version>1_2</javax.inject.version>
-        <commons-lang3.version>3.4</commons-lang3.version>
+        <jakarta.inject.version>2.0.1</jakarta.inject.version>
         <jackson-mapper-asl.version>1.9.2</jackson-mapper-asl.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>org.apache.servicemix.bundles</groupId>
-                <artifactId>org.apache.servicemix.bundles.javax-inject</artifactId>
-                <version>${javax.inject.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-lang3</artifactId>
-                <version>${commons-lang3.version}</version>
+                <groupId>jakarta.inject</groupId>
+                <artifactId>jakarta.inject-api</artifactId>
+                <version>${jakarta.inject.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

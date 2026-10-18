@@ -20,7 +20,7 @@
     <parent>
         <groupId>org.openidentityplatform.commons</groupId>
         <artifactId>auth-filters</artifactId>
-        <version>2.1.2-SNAPSHOT</version>
+        <version>3.2.2-SNAPSHOT</version>
     </parent>
 
     <artifactId>authn-filter</artifactId>

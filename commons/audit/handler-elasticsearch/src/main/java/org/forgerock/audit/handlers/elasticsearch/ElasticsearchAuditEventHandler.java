@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 package org.forgerock.audit.handlers.elasticsearch;
 
@@ -53,6 +54,7 @@ import org.forgerock.http.protocol.Response;
 import org.forgerock.http.protocol.Responses;
 import org.forgerock.http.spi.Loader;
 import org.forgerock.json.JsonValue;
+import org.forgerock.json.resource.BadRequestException;
 import org.forgerock.json.resource.CountPolicy;
 import org.forgerock.json.resource.InternalServerErrorException;
 import org.forgerock.json.resource.NotFoundException;
@@ -198,7 +200,11 @@ public class ElasticsearchAuditEventHandler extends AuditEventHandlerBase implem
         if (query.getPagedResultsOffset() != 0) {
             offset = query.getPagedResultsOffset();
         } else if (query.getPagedResultsCookie() != null) {
-            offset = Integer.valueOf(query.getPagedResultsCookie());
+            try {
+                offset = Integer.parseInt(query.getPagedResultsCookie());
+            } catch (final NumberFormatException e) {
+                return new BadRequestException("Invalid paged results cookie", e).asPromise();
+            }
         } else {
             offset = DEFAULT_OFFSET;
         }
@@ -361,7 +367,7 @@ public class ElasticsearchAuditEventHandler extends AuditEventHandlerBase implem
      * payload to Elasticsearch.
      *
      * @param payload Elasticsearch Bulk API payload
-     * @throws BatchException indicates (full or partial) failure to publish batch
+     * @return a promise that fails with a {@link BatchException} on (full or partial) failure to publish the batch
      */
     @Override
     public Promise<Void, BatchException> publishBatch(final String payload) {

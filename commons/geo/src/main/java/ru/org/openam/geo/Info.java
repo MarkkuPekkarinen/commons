@@ -1,3 +1,19 @@
+/*
+ * The contents of this file are subject to the terms of the Common Development and
+ * Distribution License (the License). You may not use this file except in compliance with the
+ * License.
+ *
+ * You can obtain a copy of the License at legal/CDDLv1.0.txt. See the License for the
+ * specific language governing permission and limitations under the License.
+ *
+ * When distributing Covered Software, include this CDDL Header Notice in each file and include
+ * the License file at legal/CDDLv1.0.txt. If applicable, add the following below the CDDL
+ * Header, with the fields enclosed by brackets [] replaced by your own identifying
+ * information: "Portions copyright [year] [name of copyright owner]".
+ *
+ * Copyright 2020-2026 3A Systems LLC.
+ */
+
 package ru.org.openam.geo;
 
 import java.net.InetAddress;
@@ -32,9 +48,9 @@ public class Info {
 	@Override
 	public String toString() {
 		if (ip!=null&&ip.isSiteLocalAddress())
-			return MessageFormat.format("{0} ({1})",(ip!=null)?ip.getHostAddress():ipString,"LAN");
+			return MessageFormat.format("{0} ({1})",ip.getHostAddress(),"LAN");
 		else if (ip!=null&&ip.isLoopbackAddress())
-			return MessageFormat.format("{0} ({1})",(ip!=null)?ip.getHostAddress():ipString,"LOCALHOST");
+			return MessageFormat.format("{0} ({1})",ip.getHostAddress(),"LOCALHOST");
 		else if (l!=null)
 			return MessageFormat.format("{0} ({1}:{2}/{3})",
 					(ip!=null)?ip.getHostAddress():ipString,

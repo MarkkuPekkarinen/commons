@@ -1,6 +1,7 @@
 /**
  * Copyright 2005-2012 Akiban Technologies, Inc.
- * 
+ * Portions Copyrighted 2026 3A Systems, LLC.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,6 +13,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit.ui;
@@ -60,24 +62,24 @@ public class ManagementTableModel extends AbstractTableModel {
      * structures such as BufferInfo[]. Each column is described by a property
      * defined in the <code>ResourceBundle</code> associated with this class.
      * The property name is constructed from the last "." piece of the name of
-     * the supplied class and the column index as follows: <code><pre>
+     * the supplied class and the column index as follows: <pre>
      * property Name ::= 
      *      <i>classNameTail</i>.column.<i>columnIndex</i>
-     * </pre></code> For example, the specification for the first column of the
-     * {@link com.persistit.Management.BufferInfo} class is <code><pre>
+     * </pre> For example, the specification for the first column of the
+     * {@link com.persistit.Management.BufferInfo} class is <pre>
      *      BufferInfo.column.0
-     * </pre></code> The value associated with this property has the following
-     * structure: <code><pre>
+     * </pre> The value associated with this property has the following
+     * structure: <pre>
      * property Value ::=
      *      <i>accessorMethodName</i>:<i>width</i>:<i>flags</i>:<i>header</i>
-     * </code></pre> For example <code><pre>
+     * </pre> For example <pre>
      *      getRightSiblingAddress:10:A:Right Pointer
-     * </code></pre> where the <i>accessorMethodName</code> is simply a method
+     * </pre> where the <i>accessorMethodName</i> is simply a method
      * name in the supplied class (the method must take no arguments), the
      * <i>width</i> is a percentage of the total table width, and
      * <i>justification</i> is L, C or R.
      * 
-     * @param clazz
+     * @param clazz the management info class whose columns are displayed.
      */
 
     public ManagementTableModel(final Class clazz, String className, final AdminUI ui) throws NoSuchMethodException {
@@ -112,13 +114,27 @@ public class ManagementTableModel extends AbstractTableModel {
         for (int index = 0; index < columnSpecs.length; index++) {
             final StringTokenizer st = new StringTokenizer(columnSpecs[index], ":");
             final String methodName = st.nextToken();
-            final int width = Integer.parseInt(st.nextToken());
+            final int width;
+            try {
+                width = Integer.parseInt(st.nextToken());
+            } catch (final NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid width in column specification: " + columnSpecs[index], e);
+            }
             final String flags = st.nextToken();
             final String header = st.nextToken();
             String rendererName = null;
-            int minWidth = width / 2;
             if (st.hasMoreTokens()) {
-                minWidth = Integer.parseInt(st.nextToken());
+                try {
+                    // Consume the optional 5th (minimum-width) token so a
+                    // following renderer-name token is not shifted into its
+                    // slot; parsing also validates it. The effective minimum
+                    // width comes from the width token (_widths[i] / 10000),
+                    // so the parsed value itself is intentionally unused.
+                    Integer.parseInt(st.nextToken());
+                } catch (final NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            "Invalid minimum width in column specification: " + columnSpecs[index], e);
+                }
             }
             if (st.hasMoreTokens()) {
                 rendererName = st.nextToken();
@@ -216,7 +232,7 @@ public class ManagementTableModel extends AbstractTableModel {
             final TableColumnModel tcm = table.getColumnModel();
             final int count = tcm.getColumnCount();
             if (count > _displayedColumnCount) {
-                for (int i = _displayedColumnCount; --i >= count;) {
+                for (int i = count; --i >= _displayedColumnCount;) {
                     tcm.removeColumn(tcm.getColumn(i));
                 }
             }
@@ -276,7 +292,7 @@ public class ManagementTableModel extends AbstractTableModel {
      * Default Renderers
      **/
 
-    class AlignedCellRenderer extends DefaultTableCellRenderer {
+    static class AlignedCellRenderer extends DefaultTableCellRenderer {
         AlignedCellRenderer(final int alignment) {
             super();
             setHorizontalAlignment(alignment);
@@ -322,7 +338,7 @@ public class ManagementTableModel extends AbstractTableModel {
         }
     }
 
-    class KeyStateRenderer extends AlignedCellRenderer {
+    static class KeyStateRenderer extends AlignedCellRenderer {
         private final Key _key;
 
         public KeyStateRenderer() {
@@ -340,7 +356,7 @@ public class ManagementTableModel extends AbstractTableModel {
         }
     }
 
-    class ValueStateRenderer extends AlignedCellRenderer {
+    static class ValueStateRenderer extends AlignedCellRenderer {
         private final Value _value;
 
         public ValueStateRenderer() {
@@ -369,7 +385,7 @@ public class ManagementTableModel extends AbstractTableModel {
         className = className.substring(0, className.lastIndexOf('.')) + ".renderers." + rendererName;
         try {
             final Class clazz = Class.forName(className);
-            final Object object = clazz.newInstance();
+            final Object object = clazz.getDeclaredConstructor().newInstance();
             if (object instanceof AbstractCustomTableCellRenderer) {
                 ((AbstractCustomTableCellRenderer) object).setup(_adminUI, infoClass, columnSpec);
                 return (TableCellRenderer) object;

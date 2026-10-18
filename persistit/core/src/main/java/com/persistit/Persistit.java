@@ -1,5 +1,6 @@
 /**
  * Copyright 2005-2012 Akiban Technologies, Inc.
+ * Portions copyright 2026 3A Systems LLC.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,6 +13,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit;
@@ -64,6 +66,7 @@ import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
 import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.InvocationTargetException;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,13 +80,19 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.WeakHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static com.persistit.Configuration.DEFAULT_SYSTEM_VOLUME_NAME;
 import static com.persistit.Configuration.SYSTEM_PROPERTY_PREFIX;
 import static com.persistit.Configuration.SYSTEM_VOLUME_PROPERTY_NAME;
+import static com.persistit.util.SequencerConstants.CHECKPOINT_CLOSE_A;
+import static com.persistit.util.SequencerConstants.COPYBACK_CLOSE_A;
+import static com.persistit.util.ThreadSequencer.sequence;
 import static com.persistit.util.Util.NS_PER_S;
 
 /**
@@ -99,13 +108,12 @@ import static com.persistit.util.Util.NS_PER_S;
  * <li>calls one of the {@link #close()} methods to gracefully release all
  * memory resources and shut down the background threads.</li>
  * </ul>
- * </p>
  * Generally an application will have no more than one Persistit instance,
  * treating it as a singleton. However, the application is responsible for
  * holding a reference to that instance and calling {@link #close()} when
  * finished with it. Persistit's background threads are not daemon threads, and
  * an application that does not call <code>close</code> therefore will not exit
- * normally. </p>
+ * normally.
  * <p>
  * Persistit takes a large variety of configuration properties. These are
  * specified through the <code>initalize</code> method.
@@ -141,6 +149,8 @@ public class Persistit {
   final static long SHORT_DELAY = 500;
 
   private final static long CLOSE_LOG_INTERVAL = 30000000000L; // 30 sec
+
+  private final static long DEFAULT_FAST_CLOSE_WAIT_MS = 30000;
 
   private final static int ACCUMULATOR_CHECKPOINT_THRESHOLD = 256;
 
@@ -214,6 +224,14 @@ public class Persistit {
 
   private final AtomicBoolean _initialized = new AtomicBoolean();
   private final AtomicBoolean _closed = new AtomicBoolean();
+  /*
+   * Public checkpoint() calls and each pass of copyBackPages() hold the read
+   * lock while they run; close() holds the write lock, so it waits for them
+   * and they never run against resources that close() is releasing. A fast
+   * close(false) waits at most _fastCloseWaitMs for the write lock.
+   */
+  private final ReentrantReadWriteLock _checkpointCloseLock = new ReentrantReadWriteLock();
+  private volatile long _fastCloseWaitMs = DEFAULT_FAST_CLOSE_WAIT_MS;
   private final AtomicBoolean _fatal = new AtomicBoolean();
 
   private long _beginCloseTime;
@@ -308,13 +326,13 @@ public class Persistit {
 
   /**
    * Construct a Persistit instance with the supplied
-   * <code>Configuration</code> and then initialize it. The code <code><pre>
+   * <code>Configuration</code> and then initialize it. The code <pre>
    * Persistit db = new Persistit(configuration);
-   * </pre></code> is equivalent to <code><pre>
+   * </pre> is equivalent to <pre>
    * Persistit db = new Persistit();
    * db.setConfiguration(configuration);
    * db.intialize();
-   * </pre></code>
+   * </pre>
    * 
    * @see #setConfiguration(Configuration)
    * @param configuration
@@ -327,13 +345,13 @@ public class Persistit {
 
   /**
    * Construct a Persistit instance with a <code>Configuration</code> derived
-   * from the supplied <code>Properties</code> instance. The code <code><pre>
+   * from the supplied <code>Properties</code> instance. The code <pre>
    * Persistit db = new Persistit(properties);
-   * </pre></code> is equivalent to <code><pre>
+   * </pre> is equivalent to <pre>
    * Persistit db = new Persistit();
    * db.setProperties(properties);
    * db.intialize();
-   * </pre></code>
+   * </pre>
    * 
    * @see #setProperties(Properties)
    * @param properties
@@ -349,7 +367,7 @@ public class Persistit {
    * control the creation of a functional <code>Persistit</code> within the
    * {@link #initialize()} method. The configuration may only be set once.
    * 
-   * @param configuration
+   * @param configuration the <code>Configuration</code> to apply to this instance
    * @throws IllegalStateException
    *             if the <code>Configuration</code> has already been set
    */
@@ -418,9 +436,7 @@ public class Persistit {
    * pending updates are written before the JVM exit.
    * </p>
    * 
-   * @throws PersistitException
-   * @throws IOException
-   * @throws Exception
+   * @throws PersistitException if a persistence error prevents initialization
    */
   public synchronized void initialize() throws PersistitException {
     if (isInitialized()) {
@@ -450,6 +466,15 @@ public class Persistit {
       flush();
       _checkpointManager.checkpoint();
       _journalManager.pruneObsoleteTransactions();
+      /*
+       * Settle MVCC state left over from recovery before returning: without
+       * this, step-based visibility (e.g. Volume#getTree(String, boolean))
+       * can return stale answers until the CleanupManager timer fires. The
+       * active-transaction cache must be updated first because pruning
+       * consults it.
+       */
+      _transactionIndex.updateActiveTransactionCache();
+      pruneTimelyResources();
       startCheckpointManager();
       startCleanupManager();
       _initialized.set(true);
@@ -483,13 +508,10 @@ public class Persistit {
    * initialize();
    * </code>
    * </pre>
-   * 
-   * </p>
-   * 
+   *
    * @param propertiesFileName
    *            The path to the properties file.
-   * @throws PersistitException
-   * @throws IOException
+   * @throws PersistitException if a persistence error prevents initialization
    */
   @Deprecated
   public void initialize(final String propertiesFileName) throws PersistitException {
@@ -523,14 +545,11 @@ public class Persistit {
    * initialize();
    * </code>
    * </pre>
-   * 
-   * </p>
-   * 
+   *
    * @param properties
    *            The <code>Properties</code> instance from which to build the
    *            configuration
-   * @throws PersistitException
-   * @throws IOException
+   * @throws PersistitException if a persistence error prevents initialization
    */
   @Deprecated
   public void initialize(final Properties properties) throws PersistitException {
@@ -562,14 +581,11 @@ public class Persistit {
    * initialize();
    * </code>
    * </pre>
-   * 
-   * </p>
-   * 
+   *
    * @param configuration
    *            The <code>Configuration</code> from which to initialize
    *            Persistit
-   * @throws PersistitException
-   * @throws IOException
+   * @throws PersistitException if a persistence error prevents initialization
    */
   @Deprecated
   public void initialize(final Configuration configuration) throws PersistitException {
@@ -846,7 +862,7 @@ public class Persistit {
    *            <code>true</code> to create a new Tree if one by the specified
    *            name does not already exist.
    * 
-   * @throws PersistitException
+   * @throws PersistitException if a persistence error occurs while acquiring the <code>Exchange</code>
    */
   public Exchange getExchange(final Volume volume, final String treeName, final boolean create)
     throws PersistitException {
@@ -881,7 +897,7 @@ public class Persistit {
    * {@link com.persistit.exception.TreeNotFoundException}.
    * </p>
    * <p>
-   * The <code>volumeName</tt< you supply must match exactly one open 
+   * The <code>volumeName</code> you supply must match exactly one open
    * <code>Volume</code>. The name matches if either (a) the
    * <code>Volume</code> has an optional alias that is equal to the supplied
    * name, or (b) if the supplied name matches a substring of the
@@ -908,7 +924,7 @@ public class Persistit {
    *            <code>true</code> to create a new Tree if one by the specified
    *            name does not already exist.
    * 
-   * @throws PersistitException
+   * @throws PersistitException if a persistence error occurs while acquiring the <code>Exchange</code>
    */
   public Exchange getExchange(final String volumeName, final String treeName, final boolean create)
     throws PersistitException {
@@ -938,7 +954,7 @@ public class Persistit {
    *            The <code>Exchange</code> to release to the pool. If
    *            <code>null</code> , this method returns silently.
    * 
-   * @throws IllegalStateException
+   * @throws IllegalStateException if the <code>Exchange</code> is already in the pool
    */
   public void releaseExchange(final Exchange exchange) {
     releaseExchange(exchange, false);
@@ -970,7 +986,7 @@ public class Persistit {
    *            <code>true</code> to clear all state information;
    *            <code>false</code> to leave the state unchanged.
    * 
-   * @throws IllegalStateException
+   * @throws IllegalStateException if the <code>Exchange</code> is already in the pool
    */
   public void releaseExchange(final Exchange exchange, final boolean secure) {
     if (exchange == null) {
@@ -1010,9 +1026,9 @@ public class Persistit {
    * has a Volume-only selector (no tree pattern was specified), then this
    * method adds the Volume's directory Tree to the list.
    * 
-   * @param selector
+   * @param selector the <code>TreeSelector</code> that determines which <code>Tree</code>s are selected
    * @return the List
-   * @throws PersistitException
+   * @throws PersistitException if a persistence error occurs while enumerating <code>Tree</code>s
    */
   public List<Tree> getSelectedTrees(final TreeSelector selector) throws PersistitException {
     final List<Tree> list = new ArrayList<Tree>();
@@ -1047,7 +1063,7 @@ public class Persistit {
    * 
    * @return The <code>Volume</code>
    * 
-   * @throws PersistitException
+   * @throws PersistitException if the volume cannot be opened or created
    */
   public Volume loadVolume(final String vstring) throws PersistitException {
     final VolumeSpecification volumeSpec = _configuration.volumeSpecification(vstring);
@@ -1066,7 +1082,7 @@ public class Persistit {
    * 
    * @return The <code>Volume</code>
    * 
-   * @throws PersistitException
+   * @throws PersistitException if the volume cannot be opened or created
    */
   public Volume loadVolume(final VolumeSpecification volumeSpec) throws PersistitException {
     Volume volume = getVolume(volumeSpec.getName());
@@ -1081,17 +1097,17 @@ public class Persistit {
    * Create a temporary volume. A temporary volume is not durable; it should
    * be used to hold temporary data such as intermediate sort or aggregation
    * results that can be recreated in the event the system restarts.
-   * <p />
+   * <p>
    * The temporary volume page size is can be specified by the configuration
    * property <code>tmpvolpagesize</code>. The default value is determined by
    * the {@link BufferPool} having the largest page size.
-   * <p />
+   * <p>
    * The backing store file for a temporary volume is created in the directory
    * specified by the configuration property <code>tmpvoldir</code>, or if
    * unspecified, the system temporary directory..
    * 
    * @return the temporary <code>Volume</code>.
-   * @throws PersistitException
+   * @throws PersistitException if the temporary volume cannot be created
    */
   public Volume createTemporaryVolume() throws PersistitException {
     return createTemporaryVolume(temporaryVolumePageSize());
@@ -1101,7 +1117,7 @@ public class Persistit {
    * Create a temporary volume. A temporary volume is not durable; it should
    * be used to hold temporary data such as intermediate sort or aggregation
    * results that can be recreated in the event the system restarts.
-   * <p />
+   * <p>
    * The backing store file for a temporary volume is created in the directory
    * specified by the configuration property <code>tmpvoldir</code>, or if
    * unspecified, the system temporary directory.
@@ -1111,7 +1127,7 @@ public class Persistit {
    *            8192 or 16384, and the volume will be usable only if there are
    *            buffers of the specified size in the {@link BufferPool}.
    * @return the temporary <code>Volume</code>.
-   * @throws PersistitException
+   * @throws PersistitException if the temporary volume cannot be created
    */
   public Volume createTemporaryVolume(final int pageSize) throws PersistitException {
     if (!Volume.isValidPageSize(pageSize)) {
@@ -1142,7 +1158,7 @@ public class Persistit {
    *            the Volume to delete
    * @return <code>true</code> if the volume was previously loaded and has
    *         been successfully deleted.
-   * @throws PersistitException
+   * @throws PersistitException if the volume cannot be closed or deleted
    */
 
   public boolean deleteVolume(final String volumeName) throws PersistitException {
@@ -1240,8 +1256,7 @@ public class Persistit {
    * <li>(b) its path, by matching the absolute forms of the volume's path and
    * the supplied path.</li>
    * </ul>
-   * </p>
-   * 
+   *
    * @param name
    *            Name that identifies a volume by matching either its alias (if
    *            it has one) or a substring of its file name.
@@ -1308,7 +1323,7 @@ public class Persistit {
 
   /**
    * @return reserved temporary volume for locks
-   * @throws PersistitException
+   * @throws PersistitException if the lock volume cannot be created
    */
   public synchronized Volume getLockVolume() throws PersistitException {
     checkInitialized();
@@ -1406,7 +1421,6 @@ public class Persistit {
 
   /**
    * @return The most recently proposed Checkpoint.
-   * @throws PersistitInterruptedException
    */
   public Checkpoint getCurrentCheckpoint() {
     return _checkpointManager.getCurrentCheckpoint();
@@ -1415,19 +1429,36 @@ public class Persistit {
   /**
    * Force a new Checkpoint and wait for it to be written. If Persistit is
    * closed or not yet initialized, do nothing and return <code>null</code>.
+   * A concurrent {@link #close()} waits until a checkpoint in progress has
+   * finished; a checkpoint requested while <code>close()</code> is running
+   * waits for it to finish and then returns <code>null</code>, unless a fast
+   * {@link #close(boolean) close(false)} has stopped waiting.
    * 
    * @return the Checkpoint allocated by this process.
-   * @throws PersistitInterruptedException
+   * @throws PersistitInterruptedException if the thread is interrupted while waiting for a running close() or for the checkpoint to be written
    */
   public Checkpoint checkpoint() throws PersistitException {
+    /*
+     * Checked before the lock too: lockInterruptibly() throws on an
+     * interrupted thread even when Persistit is already closed.
+     */
     if (_closed.get() || !_initialized.get()) {
       return null;
     }
-    cleanup();
-    _journalManager.pruneObsoleteTransactions();
-    final Checkpoint result = _checkpointManager.checkpoint();
-    _journalManager.pruneObsoleteTransactions();
-    return result;
+    lockCheckpointClose();
+    try {
+      if (_closed.get() || !_initialized.get()) {
+        return null;
+      }
+      sequence(CHECKPOINT_CLOSE_A);
+      cleanup();
+      _journalManager.pruneObsoleteTransactions();
+      final Checkpoint result = _checkpointManager.checkpoint();
+      _journalManager.pruneObsoleteTransactions();
+      return result;
+    } finally {
+      _checkpointCloseLock.readLock().unlock();
+    }
   }
 
   final long earliestLiveTransaction() {
@@ -1445,9 +1476,15 @@ public class Persistit {
   /**
    * Copy back all pages from the journal to their host Volumes. This
    * condenses the total number of journals as much as possible given the
-   * current activity in the system.
+   * current activity in the system. A concurrent {@link #close()} waits until
+   * the copy-back pass in progress has finished; the next pass then fails
+   * with a {@link PersistitClosedException}. A pass that starts while
+   * <code>close()</code> is running waits for it to finish and then fails the
+   * same way, unless a fast {@link #close(boolean) close(false)} has stopped
+   * waiting.
    * 
-   * @throws Exception
+   * @throws PersistitInterruptedException if the thread is interrupted while waiting for a running close()
+   * @throws Exception if an error occurs while copying pages back to their volumes
    */
   public void copyBackPages() throws Exception {
     /*
@@ -1457,20 +1494,54 @@ public class Persistit {
      * enough
      */
     for (int i = 0; i < 5; ++i) {
-      if (!_closed.get() && _initialized.get()) {
-        _transactionIndex.updateActiveTransactionCache();
-        _journalManager.pruneObsoleteTransactions();
-        _checkpointManager.checkpoint();
-        _journalManager.copyBack();
-        final int fileCount = _journalManager.getJournalFileCount();
-        final long size = _journalManager.getCurrentJournalSize();
-        if ((fileCount == 1) && (size < JournalManager.ROLLOVER_THRESHOLD)) {
-          break;
-        }
-      } else {
+      /*
+       * Hold off close() for one pass at a time, not for the whole loop: a
+       * pass may copy back a large journal. Checked before the lock too, as
+       * in checkpoint().
+       */
+      if (_closed.get() || !_initialized.get()) {
         throw new PersistitClosedException();
       }
+      lockCheckpointClose();
+      try {
+        if (!_closed.get() && _initialized.get()) {
+          sequence(COPYBACK_CLOSE_A);
+          _transactionIndex.updateActiveTransactionCache();
+          _journalManager.pruneObsoleteTransactions();
+          _checkpointManager.checkpoint();
+          _journalManager.copyBack();
+          final int fileCount = _journalManager.getJournalFileCount();
+          final long size = _journalManager.getCurrentJournalSize();
+          if ((fileCount == 1) && (size < JournalManager.ROLLOVER_THRESHOLD)) {
+            break;
+          }
+        } else {
+          throw new PersistitClosedException();
+        }
+      } finally {
+        _checkpointCloseLock.readLock().unlock();
+      }
     }
+  }
+
+  /**
+   * Take the read side of the checkpoint/close lock, waiting for a running
+   * {@link #close} to finish.
+   */
+  private void lockCheckpointClose() throws PersistitInterruptedException {
+    try {
+      _checkpointCloseLock.readLock().lockInterruptibly();
+    } catch (final InterruptedException ie) {
+      throw new PersistitInterruptedException(ie);
+    }
+  }
+
+  /**
+   * Test only: how long a fast {@link #close(boolean) close(false)} waits for
+   * checkpoints and copy-back passes in progress before it closes anyway.
+   */
+  void setFastCloseWaitMs(final long fastCloseWaitMs) {
+    _fastCloseWaitMs = fastCloseWaitMs;
   }
 
   /**
@@ -1510,7 +1581,7 @@ public class Persistit {
    * @return the <code>BufferPool</code> for the specific buffer size
    */
   BufferPool getBufferPool(final int size) {
-    return _bufferPoolTable.get(new Integer(size));
+    return _bufferPoolTable.get(Integer.valueOf(size));
   }
 
   /**
@@ -1535,7 +1606,7 @@ public class Persistit {
    * Reports status of the <code>max</code> longest-running transactions, in
    * order from oldest to youngest.
    * 
-   * @param max
+   * @param max the maximum number of transactions to report
    * @return status of the <code>max</code> longest-running transactions, in
    *         order from oldest to youngest, reported as a String with one line
    *         per transaction.
@@ -1569,11 +1640,8 @@ public class Persistit {
    * <p>
    * Close the Persistit Journal and all {@link Volume}s. This method is
    * equivalent to {@link #close(boolean) close(true)}.
-   * 
-   * @throws PersistitException
-   * @throws IOException
-   * @throws PersistitException
-   * @throws IOException
+   *
+   * @throws PersistitException if a persistence error occurs while closing
    */
   public void close() throws PersistitException {
     close(true);
@@ -1603,11 +1671,22 @@ public class Persistit {
    * applied updates may be missing.
    * </p>
    * <p>
+   * Closing waits for {@link #checkpoint()} calls and {@link #copyBackPages()}
+   * passes in progress. When <code>flush</code> is false it waits for them at
+   * most 30 seconds and then closes anyway. An interrupt does not stop this
+   * wait, so that an interrupted thread still closes Persistit; an interrupt
+   * while shutdown is suspended still throws a
+   * {@link PersistitInterruptedException}. A
+   * <code>close(true)</code> held up by a checkpoint that cannot complete
+   * goes on once the thread running that checkpoint is interrupted.
+   * </p>
+   * <p>
    * Note that Persistit starts non-daemon threads that will keep a JVM from
    * exiting until you close Persistit. This is to ensure that all pending
    * updates are written before the JVM exits. Therefore the recommended
    * pattern for initializing, using and then closing Persistit is:
-   * <code><pre>
+   * </p>
+   * <pre>
    *   try
    *   {
    *      Persistit.initialize();
@@ -1617,7 +1696,9 @@ public class Persistit {
    *   {
    *      Persisit.close();
    *   }
-   * </pre></code> This pattern ensures that Persistit is closed properly and
+   * </pre>
+   * <p>
+   * This pattern ensures that Persistit is closed properly and
    * all threads terminated even if the application code throws an exception
    * or error.
    * </p>
@@ -1627,24 +1708,82 @@ public class Persistit {
    *            <code>true</code> to ensure all dirty pages are written to
    *            disk before shutdown completes; <code>false</code> to enable
    *            fast (but incomplete) shutdown.
-   * 
-   * @throws PersistitException
-   * @throws IOException
-   * @throws PersistitException
-   * @throws IOException
+   *
+   * @throws PersistitException if a persistence error occurs while closing
    */
   public void close(final boolean flush) throws PersistitException {
-    if (_initialized.get() && !_closed.get()) {
-      synchronized (this) {
-        // Wait for UI to go down.
-        while (_suspendShutdown.get()) {
-          try {
-            wait(SHORT_DELAY);
-          } catch (final InterruptedException ie) {
-            throw new PersistitInterruptedException(ie);
-          }
+    if (!_initialized.get() || _closed.get()) {
+      /*
+       * Not initialized, closed, or another close() is past
+       * _closed.set(true): do not wait, since a checkpoint left stuck by a
+       * timed-out fast close may hold the read lock for good. A close()
+       * arriving mid-close therefore returns without waiting for the first
+       * one to finish.
+       */
+      doClose(flush);
+      return;
+    }
+    /*
+     * Wait for UI to go down before taking the write lock: while shutdown is
+     * suspended, management tools may still run checkpoints and backups.
+     */
+    synchronized (this) {
+      while (_suspendShutdown.get()) {
+        try {
+          wait(SHORT_DELAY);
+        } catch (final InterruptedException ie) {
+          throw new PersistitInterruptedException(ie);
         }
       }
+    }
+    final Lock writeLock = _checkpointCloseLock.writeLock();
+    if (flush) {
+      writeLock.lock();
+    } else if (!tryLockForFastClose(writeLock)) {
+      // Timed out: close anyway, without the lock.
+      doClose(flush);
+      return;
+    }
+    try {
+      doClose(flush);
+    } finally {
+      writeLock.unlock();
+    }
+  }
+
+  /**
+   * A fast close must not wait without limit behind a checkpoint that cannot
+   * complete, e.g. after a failed journal write: wait at most
+   * <code>_fastCloseWaitMs</code> for the write lock, then close anyway,
+   * releasing resources under that checkpoint. An interrupt does not stop the
+   * wait, so that an interrupted thread still closes; the interrupt status is
+   * restored afterwards. Package-private so that tests can call it directly.
+   *
+   * @return whether the write lock was acquired
+   */
+  boolean tryLockForFastClose(final Lock writeLock) {
+    final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(_fastCloseWaitMs);
+    boolean interrupted = false;
+    boolean locked;
+    while (true) {
+      try {
+        locked = writeLock.tryLock(Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+        break;
+      } catch (final InterruptedException ie) {
+        interrupted = true;
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+    if (!locked) {
+      _logBase.fastCloseCheckpointTimeout.log(_fastCloseWaitMs);
+    }
+    return locked;
+  }
+
+  private void doClose(final boolean flush) throws PersistitException {
+    if (_initialized.get() && !_closed.get()) {
       recordBufferPoolInventory();
       _cleanupManager.close(flush);
       waitForIOTaskStop(_cleanupManager);
@@ -1752,12 +1891,10 @@ public class Persistit {
    */
   public void crash() {
     final JournalManager journalManager = _journalManager;
-    if (journalManager != null) {
-      try {
-        journalManager.crash();
-      } catch (final IOException e) {
-        _logBase.exception.log(e);
-      }
+    try {
+      journalManager.crash();
+    } catch (final IOException e) {
+      _logBase.exception.log(e);
     }
     //
     // Even on simulating a crash we need to try to close
@@ -1773,10 +1910,8 @@ public class Persistit {
       }
     }
     final Map<Integer, BufferPool> buffers = _bufferPoolTable;
-    if (buffers != null) {
-      for (final BufferPool pool : buffers.values()) {
-        pool.crash();
-      }
+    for (final BufferPool pool : buffers.values()) {
+      pool.crash();
     }
     _transactionIndex.crash();
     _cleanupManager.crash();
@@ -1872,8 +2007,7 @@ public class Persistit {
    * written.
    * 
    * @return <i>true</i> if any file writes were performed, else <i>false</i>.
-   * @throws PersistitException
-   * @throws IOException
+   * @throws PersistitException if a persistence error occurs while flushing
    */
   public boolean flush() throws PersistitException {
     if (_closed.get() || !_initialized.get()) {
@@ -1938,8 +2072,6 @@ public class Persistit {
    * Persistit. An application may call this method after {@link #flush} to
    * ensure (within the capabilities of the host operating system) that all
    * database updates have actually been written to disk.
-   * 
-   * @throws IOException
    */
   public void force() throws PersistitException {
     if (_closed.get() || !_initialized.get()) {
@@ -1983,7 +2115,7 @@ public class Persistit {
    * {@link #setUpdateSuspended} method controls whether update operations are
    * currently suspended.
    * 
-   * @throws PersistitInterruptedException
+   * @throws PersistitInterruptedException if the thread is interrupted while waiting
    */
   public void checkSuspended() throws PersistitInterruptedException {
     while (isUpdateSuspended()) {
@@ -2008,7 +2140,7 @@ public class Persistit {
    * extreme care to avoid having two threads with the same SessionId at any
    * time.
    * 
-   * @param sessionId
+   * @param sessionId the <code>SessionId</code> to bind to the current thread
    */
   public void setSessionId(final SessionId sessionId) {
     sessionId.assign();
@@ -2018,7 +2150,7 @@ public class Persistit {
   /**
    * Close the session resources associated with the current thread.
    * 
-   * @throws PersistitException
+   * @throws PersistitException if a persistence error occurs while closing the session
    */
   void closeSession() throws PersistitException {
     final SessionId sessionId = _sessionIdThreadLocal.get();
@@ -2163,7 +2295,7 @@ public class Persistit {
    * instances of {@link com.persistit.encoding.ValueCoder} and
    * {@link com.persistit.encoding.KeyCoder}.
    * 
-   * @param coderManager
+   * @param coderManager the <code>CoderManager</code> to install
    */
   public void setCoderManager(final CoderManager coderManager) {
     _coderManager.set(coderManager);
@@ -2258,8 +2390,6 @@ public class Persistit {
    * Replaces the current logger implementation.
    * 
    * @see com.persistit.logging.DefaultPersistitLogger
-   * @see com.persistit.logging.JDK14LoggingAdapter
-   * @see com.persistit.logging.Log4JAdapter
    * @param logger
    *            The new logger implementation
    */
@@ -2296,7 +2426,7 @@ public class Persistit {
    * <code>Volume</code>s and reports detailed results to
    * {@link java.lang.System#out}.
    * 
-   * @throws PersistitException
+   * @throws PersistitException if a persistence error occurs during the integrity check
    */
   public void checkAllVolumes() throws PersistitException {
     final IntegrityCheck icheck = new IntegrityCheck(this);
@@ -2331,15 +2461,21 @@ public class Persistit {
    *            If <code>true</code>, sets the shutdown suspend flag. Setting
    *            this flag suspends the {@link #close} method to permit
    *            continued use of the diagnostic GUI.
-   * @throws ClassNotFoundException
-   * @throws IllegalAccessException
-   * @throws InstantiationException
+   * @throws ClassNotFoundException if the diagnostic GUI class cannot be found
+   * @throws IllegalAccessException if the diagnostic GUI class cannot be accessed
+   * @throws InstantiationException if the diagnostic GUI class cannot be instantiated
    */
   public void setupGUI(final boolean suspendShutdown) throws IllegalAccessException, InstantiationException,
     ClassNotFoundException, RemoteException {
     if (_localGUI == null) {
       _logBase.startAdminUI.log();
-      _localGUI = (UtilControl) (Class.forName(PERSISTIT_GUI_CLASS_NAME)).newInstance();
+      try {
+        _localGUI = (UtilControl) Class.forName(PERSISTIT_GUI_CLASS_NAME).getDeclaredConstructor().newInstance();
+      } catch (final NoSuchMethodException | InvocationTargetException e) {
+        final InstantiationException instantiationException = new InstantiationException(e.toString());
+        instantiationException.initCause(e);
+        throw instantiationException;
+      }
     }
     _localGUI.setManagement(getManagement());
     _suspendShutdown.set(suspendShutdown);
@@ -2586,8 +2722,8 @@ public class Persistit {
    * </ul>
    * 
    * 
-   * @param args
-   * @throws Exception
+   * @param args the command-line arguments
+   * @throws Exception if an error occurs while performing the requested operation
    */
   public static void main(final String[] args) throws Exception {
     final ArgParser ap = new ArgParser("Persistit", args, ARG_TEMPLATE).strict();
@@ -2616,9 +2752,10 @@ public class Persistit {
       task.runTask();
       task.setPersistit(persistit);
     } else if (!scriptName.isEmpty()) {
-      final BufferedReader reader = new BufferedReader(new FileReader(scriptName));
-      final PrintWriter writer = new PrintWriter(System.out);
-      CLI.runScript(persistit, reader, writer);
+      try (final BufferedReader reader = new BufferedReader(new FileReader(scriptName))) {
+        final PrintWriter writer = new PrintWriter(System.out);
+        CLI.runScript(persistit, reader, writer);
+      }
     } else {
       if (persistit == null) {
         throw new IllegalArgumentException("Must specify a properties file");

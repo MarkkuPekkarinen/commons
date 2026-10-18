@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2011-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 define([
@@ -300,7 +301,8 @@ define([
     Handlebars.registerHelper("staticSelect", function(value, options){
         var selected = $("<select />").html(options.fn(this));
         if (typeof value !== "undefined" && value !== null) {
-            selected.find("[value=\'" + value.toString().replace("'", "\\'") + "\']").attr({"selected":"selected"});
+            var escaped = value.toString().replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+            selected.find("[value=\'" + escaped + "\']").attr({"selected":"selected"});
         }
         return selected.html();
     });
@@ -635,7 +637,7 @@ define([
          * @returns {Boolean}
          */
         "isUrl": function(string){
-            var regexp = /(http|https):\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@!\-\/]))?/;
+            var regexp = /(http|https):\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@\-\/]))?/;
             return regexp.test(string);
         }
 

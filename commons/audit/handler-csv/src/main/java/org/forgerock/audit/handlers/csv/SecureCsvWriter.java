@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 package org.forgerock.audit.handlers.csv;
 
@@ -97,7 +98,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
         Reject.ifFalse(config.getSecurity().isEnabled(), "SecureCsvWriter should only be used if security is enabled");
         final boolean fileAlreadyInitialized = csvFile.exists() && csvFile.length() > 0;
         this.random = random;
-        this.keyStoreFile = new File(csvFile.getPath() + ".keystore");
+        this.keyStoreFile = CsvSecureUtils.keyStoreFile(csvFile);
         this.headers = checkNotNull(headers, "The headers can't be null.");
         this.csvFormatter = new CsvFormatter(csvPreference);
         this.csvWriter = constructWriter(csvFile, fileAlreadyInitialized, config);
@@ -166,9 +167,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                 @Override
                 public void run() {
                     try {
-                    	logger.trace("THREAD !!!");
-                    	if(!signatureLock.isLocked())
-                    		writeSignature(csvWriter);
+                        writeSignature(csvWriter);
                     } catch (Exception ex) {
                         logger.error("An error occurred while writing the signature", ex);
                     }
@@ -229,30 +228,33 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
 
     @Override
     public void close() throws IOException {
-        flush();
-        signatureLock.lock();
         try {
-            forceWriteSignature(csvWriter);
-        } finally {
-            signatureLock.unlock();
-        }
-        scheduler.shutdown();
-        try {
-            while (!scheduler.awaitTermination(500, MILLISECONDS)) {
-                logger.debug("Waiting to terminate the scheduler.");
+            signatureLock.lock();
+            try {
+                forceWriteSignature(csvWriter);
+            } finally {
+                signatureLock.unlock();
             }
-        } catch (InterruptedException ex) {
-            logger.error("Unable to terminate the scheduler", ex);
-            Thread.currentThread().interrupt();
+        } finally {
+            // Also when the final signature fails: the scheduler thread is not a daemon thread, it would keep the JVM
+            // from exiting, and an open file cannot be renamed on Windows.
+            scheduler.shutdown();
+            try {
+                while (!scheduler.awaitTermination(500, MILLISECONDS)) {
+                    logger.debug("Waiting to terminate the scheduler.");
+                }
+            } catch (InterruptedException ex) {
+                logger.error("Unable to terminate the scheduler", ex);
+                Thread.currentThread().interrupt();
+            }
+            csvWriter.close();
         }
-        csvWriter.close();
     }
 
     private void forceWriteSignature(Writer writer) throws IOException {
         if (scheduledSignature != null && scheduledSignature.cancel(false)) {
             // We were able to cancel it before it starts, so let's generate the signature now.
-        	writeSignature(writer);
-            
+            writeSignature(writer);
         }
     }
 
@@ -271,7 +273,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
     void writeSignature(Writer writer) throws IOException {
         // We have to prevent from writing another line between the signature calculation
         // and the signature's row write, as the calculation uses the lastHMAC.
-    	signatureLock.lock();
+        signatureLock.lock();
         try {
             lastSignature = secureStorage.sign(dataToSign(lastSignature, lastHMAC));
             logger.trace("Calculated new Signature");
@@ -308,7 +310,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
     /**
      * Write a row into the CSV files.
      * @param values The keys of the {@link Map} have to match the column's header.
-     * @throws IOException
+     * @throws IOException if an I/O error occurs while writing the event.
      */
     @Override
     public void writeEvent(Map<String, String> values) throws IOException {
@@ -318,7 +320,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
     /**
      * Write a row into the CSV files.
      * @param values The keys of the {@link Map} have to match the column's header.
-     * @throws IOException
+     * @throws IOException if an I/O error occurs while writing the event.
      */
     public void writeEvent(Writer writer, Map<String, String> values) throws IOException {
         signatureLock.lock();
@@ -343,7 +345,6 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                     && (scheduledSignature == null || scheduledSignature.isDone())) {
                 logger.trace("Triggering a new signature task to be executed in {}", signatureInterval);
                 try {
-                	logger.trace("SHCHEDULED!!");
                     scheduledSignature = scheduler.schedule(signatureTask, signatureInterval.getValue(),
                             signatureInterval.getUnit());
                 } catch (RejectedExecutionException e) {
@@ -410,11 +411,8 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
         @Override
         public void postRotationAction(RotationContext context) throws IOException {
             // Rename the keystore and create a new one.
-            String currentName = keyStoreFile.getName();
-            String nextName = currentName.replaceFirst(context.getInitialFile().getName(),
-                    context.getNextFile().getName());
-            final File nextFile = new File(keyStoreFile.getParent(), nextName);
-            logger.trace("Renaming keystore file {} to {}", currentName, nextName);
+            final File nextFile = CsvSecureUtils.keyStoreFile(context.getNextFile());
+            logger.trace("Renaming keystore file {} to {}", keyStoreFile, nextFile);
             boolean renamed = keyStoreFile.renameTo(nextFile);
             if (!renamed) {
                 logger.error("Unable to rename {} to {}", keyStoreFile.getAbsolutePath(), nextFile.getAbsolutePath());

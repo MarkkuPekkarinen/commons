@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2025 3A Systems LLC.
  */
 
 define([
@@ -22,10 +23,10 @@ define([
     QUnit.module('OAuth Functions');
 
     QUnit.moduleStart(function() {
-        sinon.stub(URIUtils, "getCurrentOrigin", function () {
+        sinon.stub(URIUtils, "getCurrentOrigin").callsFake(function () {
             return "http://rp.com";
         });
-        sinon.stub(URIUtils, "getCurrentPathName", function () {
+        sinon.stub(URIUtils, "getCurrentPathName").callsFake(function () {
             return "/app/index.html";
         });
     });
@@ -35,19 +36,19 @@ define([
         URIUtils.getCurrentPathName.restore();
     });
 
-    QUnit.test("oAuth redirect uri", function () {
-        QUnit.equal(OAuth.getRedirectURI(),"http://rp.com/app/oauthReturn.html",
+    QUnit.test("oAuth redirect uri", function (assert) {
+        assert.equal(OAuth.getRedirectURI(),"http://rp.com/app/oauthReturn.html",
             "default oAuth redirect_uri matches"
         );
-        QUnit.equal(OAuth.getRedirectURI('customOAuthReturn.html'),"http://rp.com/app/customOAuthReturn.html",
+        assert.equal(OAuth.getRedirectURI('customOAuthReturn.html'),"http://rp.com/app/customOAuthReturn.html",
             "custom oAuth redirect_uri matches"
         );
     });
-    QUnit.test("oAuth request url", function () {
-        sinon.stub(OAuth, "generateNonce", function () {
+    QUnit.test("oAuth request url", function (assert) {
+        sinon.stub(OAuth, "generateNonce").callsFake(function () {
             return "nonceValue";
         });
-        QUnit.equal(OAuth.getRequestURL(
+        assert.equal(OAuth.getRequestURL(
                 "http://idp.com/request",
                 "myClientId",
                 "openid profile email",

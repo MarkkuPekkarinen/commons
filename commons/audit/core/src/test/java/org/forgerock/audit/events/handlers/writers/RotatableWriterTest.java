@@ -12,26 +12,39 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyright 2026 3A Systems, LLC.
  */
 package org.forgerock.audit.events.handlers.writers;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Arrays.*;
 import static java.util.concurrent.TimeUnit.*;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.util.Files.*;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
 
 import org.forgerock.audit.events.handlers.FileBasedEventHandlerConfiguration;
+import org.forgerock.audit.events.handlers.writers.RotatableWriter.RolloverLifecycleHook;
 import org.forgerock.audit.retention.TimestampFilenameFilter;
 import org.forgerock.audit.rotation.FixedTimeRotationPolicy;
+import org.forgerock.audit.rotation.RotationContext;
+import org.forgerock.audit.rotation.RotationHooks;
 import org.forgerock.audit.rotation.RotationPolicy;
 import org.forgerock.audit.rotation.SizeBasedRotationPolicy;
 import org.forgerock.audit.rotation.TimeLimitRotationPolicy;
@@ -263,6 +276,101 @@ public class RotatableWriterTest {
     // TODO: testRotationForFixedTimeRotationPolicy
 
     @Test
+    public void testForceRotationRunsTheRolloverLifecycleHook() throws Exception {
+        // given
+        final File file = getTempFile();
+        final FileBasedEventHandlerConfiguration configuration = new DefaultFileBasedAuditEventHandlerConfiguration();
+        configuration.getFileRotation().setRotationEnabled(true);
+        configuration.getFileRotation().setRotationFileSuffix(ROTATION_FILE_SUFFIX);
+        final List<String> calls = new ArrayList<>();
+        rotatableWriter = new RotatableWriter(file, configuration, true, new RolloverLifecycleHook() {
+            @Override
+            public void beforeRollingOver() {
+                calls.add("beforeRollingOver");
+            }
+
+            @Override
+            public void afterRollingOver() {
+                calls.add("afterRollingOver");
+            }
+        });
+        rotatableWriter.registerRotationHooks(new RotationHooks() {
+            @Override
+            public void preRotationAction(RotationContext context) {
+                calls.add("preRotationAction");
+            }
+
+            @Override
+            public void postRotationAction(RotationContext context) {
+                calls.add("postRotationAction");
+            }
+        });
+
+        // when
+        final boolean rotated = rotatableWriter.forceRotation();
+
+        // then
+        assertThat(rotated).isTrue();
+        assertThat(calls).containsExactly(
+                "beforeRollingOver", "preRotationAction", "postRotationAction", "afterRollingOver");
+    }
+
+    @Test(timeOut = 60_000)
+    public void testFlushWaitsForTheRotationToComplete() throws Exception {
+        // given
+        final File file = getTempFile();
+        final FileBasedEventHandlerConfiguration configuration = new DefaultFileBasedAuditEventHandlerConfiguration();
+        configuration.getFileRotation().setRotationEnabled(true);
+        configuration.getFileRotation().setRotationFileSuffix(ROTATION_FILE_SUFFIX);
+        rotatableWriter = new RotatableWriter(file, configuration, true);
+        final FutureTask<Void> flush = new FutureTask<>(() -> {
+            rotatableWriter.flush();
+            return null;
+        });
+        final Thread flusher = new Thread(flush, "flusher");
+        flusher.setDaemon(true);
+        final List<Boolean> flushWaitedForTheRotation = new ArrayList<>();
+        rotatableWriter.registerRotationHooks(new RotationHooks() {
+            @Override
+            public void preRotationAction(RotationContext context) throws IOException {
+                // the rotation closes and replaces the writer after this hook
+                flusher.start();
+                flushWaitedForTheRotation.add(awaitWaitingForLockOf(flusher, Thread.currentThread(), flush));
+            }
+
+            @Override
+            public void postRotationAction(RotationContext context) {
+                // nothing to do
+            }
+        });
+
+        // when
+        rotatableWriter.forceRotation();
+
+        // then
+        flush.get(10, SECONDS);
+        assertThat(flushWaitedForTheRotation).containsExactly(true);
+    }
+
+    /**
+     * Waits until the thread waits for a lock that the owner holds, or until the task of the thread is done.
+     *
+     * @return {@code true} if the thread waits for a lock that the owner holds
+     */
+    private static boolean awaitWaitingForLockOf(final Thread thread, final Thread owner, final FutureTask<?> task) {
+        final ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+        final long deadline = System.nanoTime() + SECONDS.toNanos(10);
+        while (!task.isDone() && System.nanoTime() < deadline) {
+            final ThreadInfo threadInfo = threads.getThreadInfo(thread.getId());
+            if (threadInfo != null && threadInfo.getLockOwnerId() == owner.getId()) {
+                return true;
+            }
+            Thread.yield();
+        }
+        return false;
+    }
+
+    @Test
     public void testCanForceRotation() throws Exception {
         // given
         final File file = getTempFile();
@@ -284,6 +392,34 @@ public class RotatableWriterTest {
     }
 
     @Test
+    public void testCompressesRotatedFileInDirectoryWhoseNameContainsGzipSuffix() throws Exception {
+        // given
+        final File directory = Files.createTempDirectory("rotation.gz").toFile();
+        directory.deleteOnExit();
+        final File file = new File(directory, "audit.csv");
+        file.deleteOnExit();
+        final String prefix = "testCompressesRotatedFileInDirectoryWhoseNameContainsGzipSuffix";
+        final FileBasedEventHandlerConfiguration configuration = new DefaultFileBasedAuditEventHandlerConfiguration();
+        configuration.setRotationRetentionCheckInterval("1 hour"); // ensure asynchronous check is inactive
+        configuration.getFileRotation().setRotationEnabled(true);
+        configuration.getFileRotation().setRotationFilePrefix(prefix);
+        configuration.getFileRotation().setRotationFileSuffix(ROTATION_FILE_SUFFIX);
+        rotatableWriter = new RotatableWriter(file, configuration, true);
+        rotatableWriter.write("event");
+
+        // when
+        final boolean rotated = rotatableWriter.forceRotation();
+
+        // then
+        assertThat(rotated).isTrue();
+        final File[] rotatedFiles = directory.listFiles((dir, name) -> name.startsWith(prefix));
+        cleanupFilesWhenDone(rotatedFiles);
+        assertThat(rotatedFiles).hasSize(1);
+        assertThat(rotatedFiles[0].getName()).endsWith(".gz");
+        assertThat(gunzip(rotatedFiles[0])).isEqualTo("event");
+    }
+
+    @Test
     public void testAutomaticallyEvaluatesPolicesPeriodicallyIfRotationIntervalSpecified() throws Exception {
         // given
         final File file = getTempFile();
@@ -300,6 +436,9 @@ public class RotatableWriterTest {
 
         // when
         Thread.sleep(3000);
+        // close() stops the rotator and waits for a running rotation and retention check, so that the archives are
+        // listed in a stable state
+        rotatableWriter.close();
 
         // then
         assertRetainedHistoricalFiles(file, prefix, 1);
@@ -309,6 +448,12 @@ public class RotatableWriterTest {
     private void writeThenFlushBytes(final RotatableWriter writer, final int bytesToWrite) throws IOException {
         writer.write(new String(new byte[bytesToWrite]));
         writer.flush();
+    }
+
+    private static String gunzip(final File file) throws IOException {
+        try (InputStream in = new GZIPInputStream(new FileInputStream(file))) {
+            return new String(in.readAllBytes(), UTF_8);
+        }
     }
 
     private File getTempFile() throws IOException {
@@ -328,16 +473,18 @@ public class RotatableWriterTest {
     }
 
     private void assertRetainedHistoricalFiles(File file, String prefix, int expectedNumber) throws Exception {
-        Set<File> retainedHistoricalFiles = getAllHistoricalFiles(file, prefix, expectedNumber, new HashSet<File>());
+        Set<File> retainedHistoricalFiles = getAllHistoricalFiles(file, prefix, expectedNumber);
         assertThat(retainedHistoricalFiles).isNotEmpty().hasSize(expectedNumber);
     }
 
-    private Set<File> getAllHistoricalFiles(File file, String prefix, int expectedNumber, Set<File> existingFiles)
+    private Set<File> getAllHistoricalFiles(File file, String prefix, int expectedNumber)
             throws InterruptedException {
-        // try to load the expected number of historical files, give up if unsuccessful after 1 second
-        Set<File> allHistoricalFiles = new HashSet<>(existingFiles);
+        // try to load the expected number of historical files, give up if unsuccessful after 1 second; keep only the
+        // last listing, as one taken during a rotation also holds the uncompressed file and the previous archive,
+        // which the rotation and then the retention check delete
+        Set<File> allHistoricalFiles = new HashSet<>();
         for (int iteration = 0; iteration < 20; iteration++) {
-            allHistoricalFiles.addAll(getRetainedHistoricalFiles(file, prefix));
+            allHistoricalFiles = getRetainedHistoricalFiles(file, prefix);
             if (allHistoricalFiles.size() == expectedNumber) {
                 return allHistoricalFiles;
             }

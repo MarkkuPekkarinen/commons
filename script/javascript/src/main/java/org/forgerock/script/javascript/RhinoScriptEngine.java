@@ -1,8 +1,4 @@
 /*
- * DO NOT REMOVE COPYRIGHT NOTICES OR THIS HEADER.
- *
- * Copyright (c) 2012-2014 ForgeRock AS. All rights reserved.
- *
  * The contents of this file are subject to the terms
  * of the Common Development and Distribution License
  * (the License). You may not use this file except in
@@ -20,15 +16,20 @@
  * with the fields enclosed by brackets [] replaced by
  * your own identifying information:
  * "Portions Copyrighted [year] [name of copyright owner]"
+ *
+ * Copyright 2012-2016 ForgeRock AS.
+ * Portions Copyrighted 2018-2026 3A Systems, LLC
  */
 
 package org.forgerock.script.javascript;
 
+import org.forgerock.json.JsonValue;
 import org.forgerock.json.resource.ResourceException;
 import org.forgerock.script.engine.AbstractScriptEngine;
 import org.forgerock.script.engine.CompilationHandler;
 import org.forgerock.script.engine.ScriptEngineFactory;
 import org.forgerock.script.exception.ScriptCompilationException;
+import org.forgerock.script.exception.ScriptThrownException;
 import org.forgerock.script.scope.OperationParameter;
 import org.forgerock.script.source.ScriptSource;
 import org.forgerock.script.source.SourceContainer;
@@ -57,6 +58,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.regex.Pattern;
 
 /**
  * A NAME does ...
@@ -64,6 +66,12 @@ import java.util.concurrent.ConcurrentMap;
  * @author Laszlo Hordos
  */
 public class RhinoScriptEngine extends AbstractScriptEngine {
+    public static final String CONFIG_DEBUG_PROPERTY = "javascript.debug";
+    public static final String CONFIG_RECOMPILE_MINIMUM_INTERVAL_PROPERTY =
+            "javascript.recompile.minimumInterval";
+    public static final String CONFIG_EXCEPTION_DEBUG_INFO = "javascript.exception.debug.info";
+
+    static final Pattern RHINO_EXCEPTION_FILE_INFO_PATTERN = Pattern.compile("[ ][(].+[)]$");
 
     /**
      * Setup logging for the {@link RhinoScriptEngine}.
@@ -75,25 +83,33 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
     private final ConcurrentMap<String, ScriptCacheEntry> scriptCache =
             new ConcurrentHashMap<String, ScriptCacheEntry>();
 
-    private long minimumRecompilationInterval = -1;
+    private final long minimumRecompilationInterval;
 
     private RequireBuilder requireBuilder;
 
     private ClassLoader classLoader;
 
+    private final ScriptExceptionGenerator scriptExceptionGenerator;
+
     RhinoScriptEngine(final Map<String, Object> configuration, final ScriptEngineFactory factory,
-            final Collection<SourceContainer> sourceContainers, ClassLoader registryLevelClassLoader) {
+                      final Collection<SourceContainer> sourceContainers, ClassLoader registryLevelClassLoader) {
         this.factory = factory;
-
-        Object debugProperty = configuration.get(CONFIG_DEBUG_PROPERTY);
-        if (debugProperty instanceof String) {
-            initDebugListener((String) debugProperty);
+        final JsonValue jsonValueConfig = new JsonValue(configuration);
+        initDebugListener(jsonValueConfig.get(CONFIG_DEBUG_PROPERTY).defaultTo(null).asString());
+        final String recompileInterval =
+                jsonValueConfig.get(CONFIG_RECOMPILE_MINIMUM_INTERVAL_PROPERTY).defaultTo("-1").asString();
+        long minimumRecompilationIntervalValue;
+        try {
+            minimumRecompilationIntervalValue = Long.parseLong(recompileInterval);
+        } catch (final NumberFormatException e) {
+            logger.warn("Invalid {} configuration value '{}'; using default -1.",
+                    CONFIG_RECOMPILE_MINIMUM_INTERVAL_PROPERTY, recompileInterval);
+            minimumRecompilationIntervalValue = -1;
         }
-        Object recompile = configuration.get(CONFIG_RECOMPILE_MINIMUM_INTERVAL_PROPERTY);
-        if (recompile instanceof String) {
-            minimumRecompilationInterval = Long.valueOf((String) recompile);
-        }
-
+        minimumRecompilationInterval = minimumRecompilationIntervalValue;
+        scriptExceptionGenerator = jsonValueConfig.get(CONFIG_EXCEPTION_DEBUG_INFO).defaultTo(true).asBoolean()
+                ? DEBUG_SCRIPT_EXCEPTION_GENERATOR
+                : NON_DEBUG_SCRIPT_EXCEPTION_GENERATOR;
         // Use an Iterable over the SourceContainer collection--that way if it
         // changes (adds, removes, changes)--the new collection is reflected in
         // the UrlModuleSourceProvider.
@@ -145,7 +161,7 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
         private final long lastCheck;
 
         private ScriptCacheEntry(final Script compiledScript, final ScriptSource scriptSource,
-                long lastModified, long lastCheck) {
+                                 long lastModified, long lastCheck) {
             this.compiledScript = compiledScript;
             this.scriptSource = scriptSource;
             this.lastModified = lastModified;
@@ -186,7 +202,7 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
      * @param scriptName
      *            name of the script to run
      * @return the script object
-     * @throws ResourceException
+     * @throws ScriptException
      *             if there is a problem accessing the script
      */
     Script createScript(String scriptName) throws ScriptException {
@@ -197,6 +213,7 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
         throw new ScriptException("Script is not found:" + scriptName);
     }
 
+    @Override
     public void compileScript(CompilationHandler handler) throws ScriptException {
         try {
             boolean sharedScope = true;// config.get("sharedScope").defaultTo(true).asBoolean();
@@ -231,12 +248,13 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
 
     private Script compileScript(String name, Reader scriptReader) throws ScriptCompilationException {
         Context cx = Context.enter();
+        cx.setLanguageVersion(Context.VERSION_ES6);
         try {
             return cx.compileReader(scriptReader, name, 1, null);
         } catch (IOException ioe) {
             throw new ScriptCompilationException(ioe.getMessage(), ioe);
         } catch (RhinoException re) {
-            throw new ScriptCompilationException(re.getMessage(), re, re.sourceName(), re.lineNumber(), re.columnNumber());
+            throw getScriptExceptionGenerator().newScriptCompilationException(re);
         } finally {
             Context.exit();
             if (scriptReader != null) {
@@ -249,6 +267,7 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
         }
     }
 
+    @Override
     public ScriptEngineFactory getFactory() {
         return factory;
     }
@@ -261,15 +280,11 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
 
     private volatile Boolean debugInitialised = null;
 
-    public static final String CONFIG_DEBUG_PROPERTY = "javascript.debug";
-    public static final String CONFIG_RECOMPILE_MINIMUM_INTERVAL_PROPERTY =
-            "javascript.recompile.minimumInterval";
-
     private synchronized void initDebugListener(String configString) {
         if (null == debugInitialised) {
             // Get here only once when the first factory initialised.
             if (null != configString) {
-                try {
+                /*try {
                     if (null == debugListener) {
                         debugListener = new org.eclipse.wst.jsdt.debug.rhino.debugger.RhinoDebugger(configString);
                         Context.enter().getFactory().addListener(debugListener);
@@ -289,12 +304,12 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
                         // RhinoDebugger class
                         logger.warn("RhinoDebugger can not be started because the JSDT RhinoDebugger and Transport bundles must be deployed.");
                     }
-                }
+                }*/
                 debugInitialised = null == debugInitialised ? Boolean.FALSE : debugInitialised;
             } else if (false /* TODO How to stop */) {
                 try {
-                    ((org.eclipse.wst.jsdt.debug.rhino.debugger.RhinoDebugger) debugListener)
-                            .stop();
+                    /*((org.eclipse.wst.jsdt.debug.rhino.debugger.RhinoDebugger) debugListener)
+                            .stop();*/
                 } catch (Throwable ex) {
                     // We do not care about the NoClassDefFoundError when we
                     // "Stop"
@@ -364,4 +379,77 @@ public class RhinoScriptEngine extends AbstractScriptEngine {
     // return new RhinoScript(name, source, sharedScope);
     // }
 
+    /**
+     * Interface defining factory for exceptions resulting from script compilation or execution.
+     */
+    interface ScriptExceptionGenerator {
+        /**
+         * @param e the RhinoException representing the thrown exception
+         * @param scriptThrownExceptionValue the actual exception value thrown by the script, converted to a java object
+         * @return a ScriptThrownException representing this exception, and encapsulating the correct level of debug information
+         */
+        ScriptThrownException newScriptThrownException(RhinoException e, Object scriptThrownExceptionValue);
+
+        /**
+         *
+         * @param e the RhinoException generated by the script compilation failure
+         * @return a ScriptCompilationException representing this failure, and encapsulating the correct level of debug information
+         */
+        ScriptCompilationException newScriptCompilationException(RhinoException e);
+
+        /**
+         *
+         * @param e the RhinoException thrown by the RhinoEngine during script execution
+         * @return a ScriptException representing this exception, and encapsulating the correct level of debug information.
+         */
+        ScriptException newScriptException(RhinoException e);
+    }
+
+    ScriptExceptionGenerator getScriptExceptionGenerator() {
+        return scriptExceptionGenerator;
+    }
+
+    private static final ScriptExceptionGenerator DEBUG_SCRIPT_EXCEPTION_GENERATOR = new ScriptExceptionGenerator() {
+        @Override
+        public ScriptThrownException newScriptThrownException(RhinoException e, Object scriptThrownExceptionValue) {
+            return new ScriptThrownException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber(),
+                    scriptThrownExceptionValue);
+        }
+
+        @Override
+        public ScriptCompilationException newScriptCompilationException(RhinoException e) {
+            return new ScriptCompilationException(e.getMessage(), e, e.sourceName(), e.lineNumber(), e.columnNumber());
+        }
+
+        @Override
+        public ScriptException newScriptException(RhinoException e) {
+            return new ScriptException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber());
+        }
+    };
+
+    private static final ScriptExceptionGenerator NON_DEBUG_SCRIPT_EXCEPTION_GENERATOR = new ScriptExceptionGenerator() {
+        @Override
+        public ScriptThrownException newScriptThrownException(RhinoException e, Object scriptThrownExceptionValue) {
+            return new ScriptThrownException(stripDebugInformationFromRhinoExceptionMessage(e), scriptThrownExceptionValue);
+        }
+
+        @Override
+        public ScriptCompilationException newScriptCompilationException(RhinoException e) {
+            return new ScriptCompilationException(stripDebugInformationFromRhinoExceptionMessage(e));
+        }
+
+        @Override
+        public ScriptException newScriptException(RhinoException e) {
+            return new ScriptException(stripDebugInformationFromRhinoExceptionMessage(e));
+        }
+
+        /*
+        The Rhino runtime can include script debug information in the exception message. The format of this included information
+        can be found in RhinoException#getMessage. The pattern below will match this information, if present, and return only
+        the preceeding message state.
+         */
+        private String stripDebugInformationFromRhinoExceptionMessage(RhinoException e) {
+            return RHINO_EXCEPTION_FILE_INFO_PATTERN.split(e.getMessage())[0];
+        }
+    };
 }

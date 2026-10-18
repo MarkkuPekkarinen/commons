@@ -15,14 +15,22 @@
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  **/
 
 package com.savage7.maven.plugin.dependency;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.Writer;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -39,7 +47,6 @@ import org.codehaus.plexus.digest.Digester;
 import org.codehaus.plexus.digest.DigesterException;
 import org.codehaus.plexus.digest.Md5Digester;
 import org.codehaus.plexus.digest.Sha1Digester;
-import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.WriterFactory;
 import org.w3c.dom.Document;
 import org.w3c.dom.Node;
@@ -49,14 +56,19 @@ import org.w3c.dom.NodeList;
  * Base class for all goals in this plugin.
  * 
  * @author <a href="mailto:robert@savage7.com">Robert Savage</a>
- * @see http://code.google.com/p/maven-external-dependency-plugin/
+ * @see <a href="http://code.google.com/p/maven-external-dependency-plugin/">http://code.google.com/p/maven-external-dependency-plugin/</a>
  * @version 0.1
- * @category Maven Plugin
- * @ThreadSafe
  */
 public abstract class AbstractExternalDependencyMojo extends
         AbstractInstallMojo
 {
+
+    /**
+     * Creates a new instance.
+     */
+    protected AbstractExternalDependencyMojo()
+    {
+    }
 
     /**
      * Used to look up Artifacts in the remote repository.
@@ -76,6 +88,8 @@ public abstract class AbstractExternalDependencyMojo extends
     protected ArrayList<ArtifactItem> artifactItems;
 
     /**
+     * The Maven project the plugin is operating on.
+     *
      * @parameter default-value="${project}"
      * @required
      * @readonly
@@ -83,6 +97,8 @@ public abstract class AbstractExternalDependencyMojo extends
     protected MavenProject project;
 
     /**
+     * The staging directory where downloaded artifacts are placed.
+     *
      * @parameter default-value="${project.build.directory}"
      */
     protected String stagingDirectory;
@@ -109,6 +125,7 @@ public abstract class AbstractExternalDependencyMojo extends
      * Create Maven Artifact object from ArtifactItem configuration descriptor
      * 
      * @param item
+     *            the artifact item describing the artifact to create
      * @return Artifact
      */
     protected Artifact createArtifact(ArtifactItem item)
@@ -128,6 +145,8 @@ public abstract class AbstractExternalDependencyMojo extends
      * responsibility of the caller to delete the generated file when no longer
      * needed.
      * 
+     * @param artifact
+     *            the artifact item to generate a POM file for
      * @return The path to the generated POM file, never <code>null</code>.
      * @throws MojoExecutionException
      *             If the POM file could not be generated.
@@ -137,14 +156,16 @@ public abstract class AbstractExternalDependencyMojo extends
     {
         Model model = generateModel(artifact);
 
-        Writer writer = null;
         try
         {
-            File pomFile = File.createTempFile(artifact.getGroupId() + "."
+            Path pomFilePath = Files.createTempFile(artifact.getGroupId() + "."
                     + artifact.getArtifactId(), ".pom");
+            File pomFile = pomFilePath.toFile();
 
-            writer = WriterFactory.newXmlWriter(pomFile);
-            new MavenXpp3Writer().write(writer, model);
+            try (Writer writer = WriterFactory.newXmlWriter(pomFile))
+            {
+                new MavenXpp3Writer().write(writer, model);
+            }
 
             return pomFile;
         }
@@ -153,15 +174,13 @@ public abstract class AbstractExternalDependencyMojo extends
             throw new MojoExecutionException(
                     "Error writing temporary POM file: " + e.getMessage(), e);
         }
-        finally
-        {
-            IOUtil.close(writer);
-        }
     }
 
     /**
      * Generates a minimal model from the user-supplied artifact information.
      * 
+     * @param artifact
+     *            the artifact item to generate a model from
      * @return The generated model, never <code>null</code>.
      */
     protected Model generateModel(ArtifactItem artifact)
@@ -180,6 +199,8 @@ public abstract class AbstractExternalDependencyMojo extends
      * Resolves the file path and returns a file object instance for an artifact
      * item
      * 
+     * @param artifactItem
+     *            the artifact item whose file path is resolved
      * @return File object for artifact item
      */
     protected File getFullyQualifiedArtifactFilePath(ArtifactItem artifactItem)
@@ -202,6 +223,9 @@ public abstract class AbstractExternalDependencyMojo extends
      *            not be <code>null</code>.
      * @param digester
      *            The checksum algorithm to use, must not be <code>null</code>.
+     * @param checksum
+     *            the expected checksum to compare against
+     * @return <code>true</code> if the calculated checksum matches the expected checksum
      * @throws MojoExecutionException
      *             If the checksum could not be installed.
      */
@@ -234,8 +258,11 @@ public abstract class AbstractExternalDependencyMojo extends
      * @param targetFile
      *            to validate checksum against
      * @throws MojoExecutionException
+     *             if the checksum cannot be calculated
      * @throws MojoFailureException
+     *             if checksum verification fails
      * @throws IOException
+     *             if the target file cannot be read
      */
     protected void verifyArtifactItemChecksum(ArtifactItem artifactItem,
             File targetFile) throws MojoExecutionException,
@@ -307,8 +334,11 @@ public abstract class AbstractExternalDependencyMojo extends
      * @param targetFile
      *            to validate checksum against
      * @throws MojoExecutionException
+     *             if the checksum cannot be calculated
      * @throws MojoFailureException
+     *             if checksum verification fails
      * @throws IOException
+     *             if the extracted file cannot be read
      */
     protected void verifyArtifactItemExtractFileChecksum(ArtifactItem artifactItem,
             File targetFile) throws MojoExecutionException,
@@ -385,8 +415,11 @@ public abstract class AbstractExternalDependencyMojo extends
      * @param targetFile
      *            to validate checksum against
      * @throws MojoExecutionException
+     *             if the Sonatype checksum lookup cannot be performed
      * @throws MojoFailureException
+     *             if a matching artifact is found in a public repository
      * @throws IOException
+     *             if the target file cannot be read
      */
     protected void verifyArtifactItemChecksumBySonatypeLookup(ArtifactItem artifactItem,
         File targetFile) throws MojoExecutionException,
@@ -514,5 +547,57 @@ public abstract class AbstractExternalDependencyMojo extends
                     + "\n\n Please verify that the GAV defined on the target artifact is correct.\n"
                     );
         }
+    }
+
+    /**
+     * Attempts to extract a POM file from within the JAR artifact.
+     * Maven-built JARs contain their POM at
+     * META-INF/maven/{groupId}/{artifactId}/pom.xml.
+     *
+     * @param artifactItem
+     *            the artifact configuration
+     * @param jarFile
+     *            the JAR file to search within
+     * @return extracted POM File, or <code>null</code> if not found
+     * @throws IOException
+     *             if an I/O error occurs while reading the JAR
+     */
+    protected File extractPomFromJar(ArtifactItem artifactItem, File jarFile)
+        throws IOException
+    {
+        String pomPath = "META-INF/maven/" + artifactItem.getGroupId()
+            + "/" + artifactItem.getArtifactId() + "/pom.xml";
+
+        getLog().debug("looking for embedded POM in JAR at: " + pomPath);
+
+        try (JarFile jar = new JarFile(jarFile))
+        {
+            JarEntry entry = jar.getJarEntry(pomPath);
+            if (entry != null)
+            {
+                File tempPom = File.createTempFile(
+                    artifactItem.getGroupId() + "." + artifactItem.getArtifactId(),
+                    ".pom");
+                tempPom.deleteOnExit();
+
+                try (InputStream is = jar.getInputStream(entry);
+                     OutputStream os = new FileOutputStream(tempPom))
+                {
+                    byte[] buffer = new byte[4096];
+                    int bytesRead;
+                    while ((bytesRead = is.read(buffer)) != -1)
+                    {
+                        os.write(buffer, 0, bytesRead);
+                    }
+                }
+
+                getLog().info(
+                    "extracted POM from JAR: " + pomPath);
+                return tempPom;
+            }
+        }
+
+        getLog().debug("no embedded POM found in JAR at: " + pomPath);
+        return null;
     }
 }

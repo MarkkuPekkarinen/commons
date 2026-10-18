@@ -12,16 +12,17 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 
 package org.forgerock.audit.handlers.jms;
 
-import javax.jms.Connection;
-import javax.jms.ConnectionFactory;
-import javax.jms.JMSException;
-import javax.jms.MessageProducer;
-import javax.jms.Session;
-import javax.jms.Topic;
+import jakarta.jms.Connection;
+import jakarta.jms.ConnectionFactory;
+import jakarta.jms.JMSException;
+import jakarta.jms.MessageProducer;
+import jakarta.jms.Session;
+import jakarta.jms.Topic;
 
 import org.forgerock.json.resource.InternalServerErrorException;
 import org.forgerock.json.resource.ResourceException;
@@ -66,7 +67,7 @@ class JmsResourceManager {
      *
      * @param configuration The Audit Configuration.
      * @param jmsContextManager The {@link JmsContextManager}.
-     * @throws InternalServerErrorException
+     * @throws InternalServerErrorException if the JMS resources cannot be initialized.
      */
     public JmsResourceManager(JmsAuditEventHandlerConfiguration configuration, JmsContextManager jmsContextManager)
             throws ResourceException {
@@ -86,7 +87,7 @@ class JmsResourceManager {
 
     /**
      * Opens the connection to the JMS services with the configured session mode.
-     * @throws JMSException
+     * @throws JMSException if there is trouble opening the connection.
      */
     public void openConnection() throws JMSException {
         connection = connectionFactory.createConnection();
@@ -97,7 +98,7 @@ class JmsResourceManager {
     /**
      * Closes the connection to the JMS services.
      *
-     * @throws JMSException
+     * @throws JMSException if there is trouble closing the connection.
      */
     public void closeConnection() throws JMSException {
         if (null != connection) {
@@ -134,7 +135,7 @@ class JmsResourceManager {
      * @param session the session to get the producer from.
      * @return a new producer from the session with the destination set to the configured JMS topic.
      * @throws JMSException if there is trouble creating the producer.
-     * @see Session#createProducer(javax.jms.Destination)
+     * @see Session#createProducer(jakarta.jms.Destination)
      * @see MessageProducer#setDeliveryMode(int)
      */
     public MessageProducer createProducer(Session session) throws JMSException {

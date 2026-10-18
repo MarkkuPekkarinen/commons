@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2012-2015 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.json.resource;
@@ -68,15 +69,20 @@ public final class MemoryBackend implements CollectionResourceProvider {
             this.lastResultIndex = lastResultIndex;
         }
 
-        static Cookie valueOf(String base64) {
+        static Cookie valueOf(String base64) throws ResourceException {
             final String decoded = new String(Base64.decode(base64));
             final String[] split = decoded.split(":");
-            final int lastOffset = Integer.parseInt(split[0]);
+            final int lastOffset;
+            try {
+                lastOffset = Integer.parseInt(split[0]);
+            } catch (final NumberFormatException e) {
+                throw new BadRequestException("Invalid paged results cookie", e);
+            }
             final List<SortKey> sortKeys = new ArrayList<>();
             final String[] splitKeys = split[1].split(",");
 
             for (String key : splitKeys) {
-                if (!key.equals("")) {
+                if (!key.isEmpty()) {
                     sortKeys.add(SortKey.valueOf(key));
                 }
             }
@@ -360,9 +366,9 @@ public final class MemoryBackend implements CollectionResourceProvider {
             final String s2 = (String) v2;
             return s1.compareToIgnoreCase(s2);
         } else if (v1 instanceof Number && v2 instanceof Number) {
-            final Double n1 = ((Number) v1).doubleValue();
-            final Double n2 = ((Number) v2).doubleValue();
-            return n1.compareTo(n2);
+            final double n1 = ((Number) v1).doubleValue();
+            final double n2 = ((Number) v2).doubleValue();
+            return Double.compare(n1, n2);
         } else if (v1 instanceof Boolean && v2 instanceof Boolean) {
             final Boolean b1 = (Boolean) v1;
             final Boolean b2 = (Boolean) v2;
@@ -596,7 +602,11 @@ public final class MemoryBackend implements CollectionResourceProvider {
                     return new BadRequestException("Cookies and offsets are mutually exclusive").asPromise();
                 }
 
-                firstResultIndex = Cookie.valueOf(pagedResultsCookie).getLastResultIndex();
+                try {
+                    firstResultIndex = Cookie.valueOf(pagedResultsCookie).getLastResultIndex();
+                } catch (final ResourceException e) {
+                    return e.asPromise();
+                }
             } else {
                 if (request.getPagedResultsOffset() > 0) {
                     firstResultIndex = request.getPagedResultsOffset();

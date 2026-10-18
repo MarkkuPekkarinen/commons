@@ -1,8 +1,4 @@
 /*
- * DO NOT REMOVE COPYRIGHT NOTICES OR THIS HEADER.
- *
- * Copyright (c) 2012-2014 ForgeRock AS. All rights reserved.
- *
  * The contents of this file are subject to the terms
  * of the Common Development and Distribution License
  * (the License). You may not use this file except in
@@ -20,6 +16,9 @@
  * with the fields enclosed by brackets [] replaced by
  * your own identifying information:
  * "Portions Copyrighted [year] [name of copyright owner]"
+ *
+ * Copyright 2012-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.script.javascript;
@@ -28,7 +27,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.security.SecureClassLoader;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -64,7 +62,6 @@ import org.slf4j.LoggerFactory;
  * <p>
  * This implementation pre-compiles the provided script. Any syntax errors in
  * the source code will throw an exception during construction of the object.
- * <p>
  *
  * @author Paul C. Bryan
  * @author aegloff
@@ -97,6 +94,9 @@ public class RhinoScript implements CompiledScript {
     /** The CommonJS module builder for Require instances. */
     private final RequireBuilder requireBuilder;
 
+    /** Indicates if this script instance should use the shared scope. */
+    private final boolean sharedScope;
+
     public static final Global GLOBAL = new Global();
 
     static {
@@ -107,67 +107,49 @@ public class RhinoScript implements CompiledScript {
      * Proxy class to avoid proliferation of anonymous classes.
      */
     private static class IProxy implements QuitAction {
+        @Override
         public void quit(Context cx, int exitCode) {
             /* no quit :) */
         }
     }
 
-    /** Indicates if this script instance should use the shared scope. */
-    private final boolean sharedScope;
-
     /**
-     * Compiles the JavaScript source code into an executable script. If
-     * {@code useSharedScope} is {@code true}, then a sealed shared scope
-     * containing standard JavaScript objects (Object, String, Number, Date,
-     * etc.) will be used for script execution; otherwise a new unsealed scope
-     * will be allocated for each execution.
      *
-     *
-     * @param compiledScript
-     *            the source code of the JavaScript script.
-     * @param sharedScope
-     *            if {@code true}, uses the shared scope, otherwise allocates
-     *            new scope.
-     * @throws ScriptException
-     *             if there was an exception encountered while compiling the
-     *             script.
+     * @param name the name of the script
+     * @param compiledScript the to-be-executed compiled script
+     * @param engine the parent script engine
+     * @param requireBuilder The CommonJS module builder for Require instances.
+     * @param sharedScope Indicates if this script instance should use the shared scope. If {@code useSharedScope} is
+     * {@code true}, then a sealed shared scope containing standard JavaScript objects (Object, String, Number, Date,
+     * etc.) will be used for script execution; otherwise a new unsealed scope will be allocated for each execution.
      */
     public RhinoScript(String name, Script compiledScript, final RhinoScriptEngine engine, RequireBuilder requireBuilder,
-            boolean sharedScope) throws ScriptException {
+                       boolean sharedScope) {
         this.scriptName = name;
         this.sharedScope = sharedScope;
         this.engine = engine;
         this.requireBuilder = requireBuilder;
         Context cx = Context.enter();
+        cx.setLanguageVersion(Context.VERSION_ES6);
         try {
             scriptScope = getScriptScope(cx);
             script = compiledScript;
-            // script = cx.compileString(source, name, 1, null);
-        } catch (RhinoException re) {
-            throw new ScriptException(re.getMessage());
         } finally {
             Context.exit();
         }
     }
 
     /**
-     * TEMPORARY
+     *
+     * @param name the name of the script
+     * @param engine the parent script engine
+     * @param requireBuilder The CommonJS module builder for Require instances.
+     * @param sharedScope Indicates if this script instance should use the shared scope. If {@code useSharedScope} is
+     * {@code true}, then a sealed shared scope containing standard JavaScript objects (Object, String, Number, Date,
+     * etc.) will be used for script execution; otherwise a new unsealed scope will be allocated for each execution.
      */
-    public RhinoScript(String name, final RhinoScriptEngine engine, RequireBuilder requireBuilder, boolean sharedScope)
-            throws ScriptException {
-        this.scriptName = name;
-        this.sharedScope = sharedScope;
-        this.engine = engine;
-        this.requireBuilder = requireBuilder;
-        Context cx = Context.enter();
-        try {
-            scriptScope = getScriptScope(cx);
-            script = null;// cx.compileReader(reader, name, 1, null);
-        } catch (RhinoException re) {
-            throw new ScriptException(re);
-        } finally {
-            Context.exit();
-        }
+    public RhinoScript(String name, final RhinoScriptEngine engine, RequireBuilder requireBuilder, boolean sharedScope) {
+        this(name, null, engine, requireBuilder, sharedScope);
     }
 
     /**
@@ -184,7 +166,6 @@ public class RhinoScript implements CompiledScript {
         if (!sharedScope) {
             // somewhat expensive
             ScriptableObject scope = context.initStandardObjects();
-            installRequire(context, scope);
             return scope;
         }
         // lazy initialization race condition is harmless
@@ -203,18 +184,11 @@ public class RhinoScript implements CompiledScript {
                 }
             }
             addLoggerProperty(scope);
-            installRequire(context, scope);
             // seal the whole scope (not just standard objects)
             scope.sealObject();
             topSharedScope = scope;
         }
         return topSharedScope;
-    }
-
-    // install require function per unofficial CommonJS author documentation
-    // https://groups.google.com/d/msg/mozilla-rhino/HCMh_lAKiI4/P1MA3sFsNKQJ
-    private void installRequire(final Context context, final ScriptableObject scope) {
-        requireBuilder.createRequire(context, scope).install(scope);
     }
 
     /**
@@ -250,6 +224,7 @@ public class RhinoScript implements CompiledScript {
         return name.indexOf("/") != -1 ? name.substring(name.lastIndexOf("/") + 1) : name;
     }
 
+    @Override
     public Bindings prepareBindings(org.forgerock.services.context.Context context, Bindings request, Bindings... scopes) {
         // TODO Fix it later
         return new SimpleBindings();
@@ -260,6 +235,7 @@ public class RhinoScript implements CompiledScript {
             throws ScriptException {
 
         Context context = Context.enter();
+        context.setLanguageVersion(Context.VERSION_ES6);
         try {
             Scriptable outer = context.newObject(getStandardObjects(context));
 
@@ -268,14 +244,12 @@ public class RhinoScript implements CompiledScript {
                     operationParameter);
 
             Set<String> safeAttributes = null != request ? request.keySet() : Collections.EMPTY_SET;
-            Map<String, Object> scope = new HashMap<String, Object>();
             for (Map<String, Object> next : scopes) {
                 if (null == next) {
                     continue;
                 }
                 for (Map.Entry<String, Object> entry : next.entrySet()) {
-                    if (scope.containsKey(entry.getKey())
-                            || safeAttributes.contains(entry.getKey())) {
+                    if (safeAttributes.contains(entry.getKey())) {
                         continue;
                     }
                     long index = ScriptRuntime.indexFromString(entry.getKey());
@@ -303,14 +277,18 @@ public class RhinoScript implements CompiledScript {
             }
 
             outer.setPrototype(scriptScope); // script level context and
-                                             // standard objects included with
-                                             // every box
+            // standard objects included with
+            // every box
             outer.setParentScope(null);
             Scriptable inner = context.newObject(outer); // inner transient
-                                                         // scope for new
-                                                         // properties
+            // scope for new
+            // properties
             inner.setPrototype(outer);
             inner.setParentScope(null);
+
+            // install require function per unofficial CommonJS author documentation
+            // https://groups.google.com/d/msg/mozilla-rhino/HCMh_lAKiI4/P1MA3sFsNKQJ
+            requireBuilder.createRequire(context, inner).install(inner);
 
             final Script scriptInstance = null != script ? script : engine.createScript(scriptName);
             Object result = Converter.convert(scriptInstance.exec(context, inner));
@@ -319,27 +297,24 @@ public class RhinoScript implements CompiledScript {
             throw e;
         } catch (WrappedException e) {
             if (e.getWrappedException() instanceof ResourceException) {
-                throw new ScriptThrownException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber(),
-                        ((ResourceException) e.getWrappedException()).toJsonValue().getObject());
+                throw getScriptExecutionGenerator().newScriptThrownException(e,
+                        ((ResourceException)e.getWrappedException()).toJsonValue().getObject());
             } else {
-                ScriptException exception =
-                        new ScriptThrownException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber(),
-                                e.getWrappedException());
+                ScriptException exception = getScriptExecutionGenerator().newScriptThrownException(e,
+                        e.getWrappedException());
                 exception.initCause(e.getWrappedException());
                 throw exception;
             }
         } catch (JavaScriptException e) {
             logger.debug("Failed to evaluate {} script.", scriptName, e);
-            ScriptThrownException exception =
-                    new ScriptThrownException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber(),
-                            Converter.convert(e.getValue()));
+            ScriptThrownException exception = getScriptExecutionGenerator().newScriptThrownException(e,
+                    Converter.convert(e.getValue()));
             exception.initCause(e);
             throw exception;
         } catch (RhinoException e) {
             logger.debug("Failed to evaluate {} script.", scriptName, e);
             // some other runtime exception encountered
-            final ScriptException exception =
-                    new ScriptException(e.getMessage(), e.sourceName(), e.lineNumber(), e.columnNumber());
+            final ScriptException exception = getScriptExecutionGenerator().newScriptException(e);
             exception.initCause(e);
             throw exception;
         } catch (Exception e) {
@@ -351,12 +326,17 @@ public class RhinoScript implements CompiledScript {
         }
     }
 
+    private RhinoScriptEngine.ScriptExceptionGenerator getScriptExecutionGenerator() {
+        return engine.getScriptExceptionGenerator();
+    }
+
     private static class InnerClassLoader extends SecureClassLoader {
 
         public InnerClassLoader(ClassLoader parent) {
             super(parent);
         }
 
+        @Override
         public Class<?> loadClass(String name) throws ClassNotFoundException {
             // First check whether it's already been loaded, if so use it
             Class loadedClass = Kit.classOrNull(getParent(), name);

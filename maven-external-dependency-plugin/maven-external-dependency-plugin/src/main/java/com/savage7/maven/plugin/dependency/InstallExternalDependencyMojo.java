@@ -10,6 +10,7 @@
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied. See the License for the specific language
  * governing permissions and limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  **/
 
 package com.savage7.maven.plugin.dependency;
@@ -30,15 +31,22 @@ import org.codehaus.plexus.digest.Digester;
  * 
  * @goal install-external
  * @author <a href="mailto:robert@savage7.com">Robert Savage</a>
- * @see http://code.google.com/p/maven-external-dependency-plugin/
+ * @see <a href="http://code.google.com/p/maven-external-dependency-plugin/">http://code.google.com/p/maven-external-dependency-plugin/</a>
  * @version 0.1
- * @category Maven Plugin
- * @ThreadSafe
  */
 public class InstallExternalDependencyMojo extends
     AbstractExternalDependencyMojo
 {
     /**
+     * Creates a new instance.
+     */
+    public InstallExternalDependencyMojo()
+    {
+    }
+
+    /**
+     * The local repository into which the artifact is installed.
+     *
      * @parameter expression="${localRepository}"
      * @required
      * @readonly
@@ -46,6 +54,8 @@ public class InstallExternalDependencyMojo extends
     protected ArtifactRepository localRepository;
 
     /**
+     * The artifact installer used to install artifacts.
+     *
      * @component
      */
     protected ArtifactInstaller installer;
@@ -71,18 +81,19 @@ public class InstallExternalDependencyMojo extends
      */
     protected boolean createChecksum = true;
 
+    @Override
     public void execute() throws MojoExecutionException, MojoFailureException
     {
         try
         {
             // update base configuration parameters
-            // (not sure why this is needed, but doesn't see to work otherwise?)
+            // (not sure why this is needed, but doesn't seem to work otherwise?)
             super.localRepository = this.localRepository;
             super.createChecksum = this.createChecksum;
             super.md5Digester = this.md5Digester;
             super.sha1Digester = this.sha1Digester;
 
-            Boolean cachedCreateChecksums = this.createChecksum;
+            boolean cachedCreateChecksums = this.createChecksum;
 
             getLog()
                 .info(
@@ -102,7 +113,7 @@ public class InstallExternalDependencyMojo extends
 
                 // determine if the artifact is already installed in the local
                 // Maven repository
-                Boolean artifactAlreadyInstalled = getLocalRepoFile(artifact)
+                boolean artifactAlreadyInstalled = getLocalRepoFile(artifact)
                     .exists();
 
                 // only proceed with this artifact if it is not already
@@ -186,18 +197,38 @@ public class InstallExternalDependencyMojo extends
                                 }
                                 else
                                 {
-                                    // dynamically create a new POM file for
-                                    // this artifact
-                                    generatedPomFile = generatePomFile(artifactItem);
-                                    ArtifactMetadata pomMetadata = new ProjectArtifactMetadata(
-                                        artifact, generatedPomFile);
-
-                                    if (artifactItem.getGeneratePom() == true)
+                                    // try to extract POM from within the JAR
+                                    File extractedPom = null;
+                                    if (artifactItem.getExtractPom() == true
+                                        && "jar".equals(artifactItem.getPackaging()))
                                     {
+                                        extractedPom = extractPomFromJar(
+                                            artifactItem, stagedArtifactFile);
+                                    }
+
+                                    if (extractedPom != null)
+                                    {
+                                        getLog().debug(
+                                            "installing POM extracted from JAR: "
+                                                + extractedPom.getAbsolutePath());
+                                        ArtifactMetadata pomMetadata =
+                                            new ProjectArtifactMetadata(
+                                                artifact, extractedPom);
+                                        artifact.addMetadata(pomMetadata);
+                                        generatedPomFile = extractedPom;
+                                    }
+                                    else if (artifactItem.getGeneratePom() == true)
+                                    {
+                                        // dynamically create a new POM file for
+                                        // this artifact
+                                        generatedPomFile = generatePomFile(artifactItem);
+                                        ArtifactMetadata pomMetadata =
+                                            new ProjectArtifactMetadata(
+                                                artifact, generatedPomFile);
                                         getLog().debug(
                                             "installing generated POM file: "
                                                 + generatedPomFile
-                                                    .getCanonicalPath());
+                                                    .getAbsolutePath());
                                         artifact.addMetadata(pomMetadata);
                                     }
                                 }
@@ -246,7 +277,7 @@ public class InstallExternalDependencyMojo extends
                 {
                     getLog()
                         .info(
-                            "this aritifact already exists in the local repository; no download is needed: "
+                            "this artifact already exists in the local repository; no download is needed: "
                                 + artifactItem.toString());
                 }
             }

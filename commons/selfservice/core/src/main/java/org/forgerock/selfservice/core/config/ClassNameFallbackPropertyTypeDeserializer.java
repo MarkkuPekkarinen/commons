@@ -12,11 +12,13 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015 ForgeRock AS.
+ * Portions copyright 2020-2026 3A Systems LLC.
  */
 package org.forgerock.selfservice.core.config;
 
 import java.io.IOException;
 
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.BeanProperty;
 import com.fasterxml.jackson.databind.DeserializationContext;
@@ -39,7 +41,7 @@ import com.fasterxml.jackson.databind.util.TokenBuffer;
 class ClassNameFallbackPropertyTypeDeserializer extends AsPropertyTypeDeserializer {
     public ClassNameFallbackPropertyTypeDeserializer(JavaType bt, TypeIdResolver idRes, String typePropertyName,
             boolean typeIdVisible, JavaType defaultImpl) {
-        super(bt, idRes, typePropertyName, typeIdVisible, defaultImpl);
+        super(bt, idRes, typePropertyName, typeIdVisible, defaultImpl, JsonTypeInfo.As.PROPERTY, true);
     }
 
     public ClassNameFallbackPropertyTypeDeserializer(AsPropertyTypeDeserializer src, BeanProperty property) {
@@ -79,7 +81,7 @@ class ClassNameFallbackPropertyTypeDeserializer extends AsPropertyTypeDeserializ
                     // ensure the type we found is assignable to the base type requested by deserialization;
                     // typically this is the interface or base class
                     if (_baseType != null && _baseType.getClass() == type.getClass()) {
-                        type = _baseType.forcedNarrowBy(type.getRawClass());
+                        type = context.getTypeFactory().constructSpecializedType(_baseType, type.getRawClass());
                     }
                     // find an appropriate deserializer for this type and deserialize
                     JsonDeserializer<Object> deser = context.findContextualValueDeserializer(type, _property);
@@ -92,7 +94,7 @@ class ClassNameFallbackPropertyTypeDeserializer extends AsPropertyTypeDeserializ
                         return deser.deserialize(newParser, context);
                     }
                 } catch (Exception ex) {
-                    throw new JsonMappingException("Unable to load class for " + node.toString(), ex);
+                    throw JsonMappingException.from(jsonParser, "Unable to load class for " + node.toString(), ex);
                 }
             }
 

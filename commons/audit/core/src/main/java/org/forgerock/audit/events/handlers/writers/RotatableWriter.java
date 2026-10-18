@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyright 2026 3A Systems, LLC.
  */
 
 package org.forgerock.audit.events.handlers.writers;
@@ -20,7 +21,6 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -34,7 +34,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
-import java.util.zip.GZIPOutputStream;
 
 import org.forgerock.audit.events.handlers.FileBasedEventHandlerConfiguration;
 import org.forgerock.audit.retention.FileNamingPolicy;
@@ -43,6 +42,7 @@ import org.forgerock.audit.rotation.RotatableObject;
 import org.forgerock.audit.rotation.RotationContext;
 import org.forgerock.audit.rotation.RotationHooks;
 import org.forgerock.audit.rotation.RotationPolicy;
+import org.forgerock.audit.util.GzipUtil;
 import org.forgerock.util.annotations.VisibleForTesting;
 import org.forgerock.util.time.Duration;
 import org.joda.time.DateTime;
@@ -190,31 +190,14 @@ public class RotatableWriter implements TextWriter, RotatableObject {
             if (logger.isTraceEnabled()) {
                 logger.trace("Renaming {} to {}", currentFile.getAbsolutePath(), newFile.getAbsolutePath());
             }
-            if (currentFile.renameTo(new File(newFile.getAbsolutePath().replace(".gz", "")))) {
+            // a file to compress is renamed without the .gz suffix, and compressed into newFile below
+            if (currentFile.renameTo(GzipUtil.removeGzipSuffix(newFile))) {
                 rotationHappened = true;
                 if (currentFile.createNewFile()) {
                     writer = constructWriter(currentFile, true);
                     context.setWriter(writer);
                     rotationHooks.postRotationAction(context);
-                    if (newFile.getName().endsWith(".gz")) { //need compression
-                    	byte[] buffer = new byte[1024];
-                    	 
-                        try {
-                            FileOutputStream fileOutputStream =new FileOutputStream(newFile);
-                            GZIPOutputStream gzipOuputStream = new GZIPOutputStream(fileOutputStream);
-                            FileInputStream fileInput = new FileInputStream(newFile.getAbsolutePath().replace(".gz", ""));
-                            int bytes_read;
-                            while ((bytes_read = fileInput.read(buffer)) > 0) {
-                                gzipOuputStream.write(buffer, 0, bytes_read);
-                            }
-                            fileInput.close();
-                            gzipOuputStream.finish();
-                            gzipOuputStream.close();
-                            new File(newFile.getAbsolutePath().replace(".gz", "")).delete();
-                        } catch (IOException ex) {
-                        	logger.error("compression {}: {}",newFile,ex.toString(),ex);
-                        }
-                    }
+                    GzipUtil.compressRotatedFile(newFile);
                 } else {
                     logger.error("Unable to resume writing to audit file {}; further events will not be logged",
                             currentFile.toString());
@@ -329,6 +312,18 @@ public class RotatableWriter implements TextWriter, RotatableObject {
      *          If an error occurs
      */
     public boolean forceRotation() throws IOException {
+        // As the scheduled checks do, run the hook before taking the write lock: the hook may take a lock that the
+        // rotation hooks need, and that writers hold while they wait for the read lock.
+        rolloverLifecycleHook.beforeRollingOver();
+        try {
+            return rotateUnderWriteLock();
+        } finally {
+            rolloverLifecycleHook.afterRollingOver();
+        }
+    }
+
+    /** Rotates the file under the write lock, whatever the rotation policies say. */
+    private boolean rotateUnderWriteLock() throws IOException {
         readWriteLock.writeLock().lock();
         try {
             isRotating.set(true);
@@ -341,7 +336,14 @@ public class RotatableWriter implements TextWriter, RotatableObject {
 
     @Override
     public void flush() throws IOException {
-        writer.flush();
+        // The rotation closes and replaces the writer under the write lock.
+        final ReadLock lock = readWriteLock.readLock();
+        lock.lock();
+        try {
+            writer.flush();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private BufferedWriter constructWriter(File csvFile, boolean append)
@@ -435,12 +437,12 @@ public class RotatableWriter implements TextWriter, RotatableObject {
     public interface RolloverLifecycleHook {
 
         /**
-         * This method is called before the rotation and retention checks are done.
+         * This method is called before the rotation and retention checks are done, and before a forced rotation.
          */
         void beforeRollingOver();
 
         /**
-         * This method is called after the rotation and retention checks are done.
+         * This method is called after the rotation and retention checks are done, and after a forced rotation.
          */
         void afterRollingOver();
     }

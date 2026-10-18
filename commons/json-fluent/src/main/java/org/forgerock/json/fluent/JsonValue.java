@@ -13,6 +13,7 @@
  *
  * Copyright © 2010–2011 ApexIdentity Inc. All rights reserved.
  * Portions Copyrighted 2011 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.json.fluent;
@@ -307,7 +308,7 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
      * Returns the JSON value as a {@link List} object. If the JSON value is {@code null},
      * this method returns {@code null}.
      *
-     * @return the list value, or {@code} null if no value.
+     * @return the list value, or {@code null} if no value.
      * @throws JsonValueException if the JSON value is not a {@code List}.
      */
     public List<Object> asList() throws JsonValueException {
@@ -321,8 +322,8 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
      * {@code JsonValueException} is thrown.
      *
      * @param type the type of object that all elements are expected to be.
-     * @return the list value, or {@code} null if no value.
-     * @throws JsonVaueException if the JSON value is not a {@code List} or contains an unexpected type.
+     * @return the list value, or {@code null} if no value.
+     * @throws JsonValueException if the JSON value is not a {@code List} or contains an unexpected type.
      * @throws NullPointerException if {@code type} is {@code null}.
      */
     @SuppressWarnings("unchecked")
@@ -669,7 +670,7 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
         if (index < 0) {
             throw new JsonValueException(this, "List index out of range: " + index);
         }
-        if (isList() && index >= 0) {
+        if (isList()) {
             List<Object> list = asList();
             if (index < list.size()) {
                 result = list.get(index);
@@ -871,15 +872,19 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
                     }
                     return result;
                 }
+                @Override
                 public Iterator<String> iterator() {
                     return new Iterator<String>() {
                         Iterator<Integer> i = range.iterator();
+                        @Override
                         public boolean hasNext() {
                             return i.hasNext();
                         }
+                        @Override
                         public String next() {
                             return i.next().toString();
                         }
+                        @Override
                         public void remove() {
                             throw new UnsupportedOperationException();
                         }
@@ -901,18 +906,22 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
      * Note: calls to the {@code next()} method may throw the runtime {@link JsonException}
      * if any transformers fail to execute.
      */
+    @Override
     public Iterator<JsonValue> iterator() {
         if (isList()) { // optimize for list
             return new Iterator<JsonValue>() {
                 int cursor = 0;
                 Iterator<Object> i = asList().iterator();
+                @Override
                 public boolean hasNext() {
                     return i.hasNext();
                 }
+                @Override
                 public JsonValue next() {
                     Object element = i.next();
                     return new JsonValue(element, pointer.child(cursor++), transformers);
                 }
+                @Override
                 public void remove() {
                     throw new UnsupportedOperationException();
                 }
@@ -920,12 +929,15 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
         } else {
             return new Iterator<JsonValue>() {
                 Iterator<String> i = keys().iterator();
+                @Override
                 public boolean hasNext() {
                     return i.hasNext();
                 }
+                @Override
                 public JsonValue next() {
                     return get(i.next());
                 }
+                @Override
                 public void remove() {
                     throw new UnsupportedOperationException();
                 }
@@ -1006,10 +1018,10 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
         } else if (isMap()) {
             sb.append("{ ");
             Map<Object, Object> map = (Map<Object, Object>)object;
-            for (Iterator<Object> i = map.keySet().iterator(); i.hasNext();) {
-                Object key = i.next();
-                sb.append('"').append(key.toString()).append("\": ");
-                sb.append(new JsonValue(map.get(key)).toString()); // recursion
+            for (Iterator<Map.Entry<Object, Object>> i = map.entrySet().iterator(); i.hasNext();) {
+                Map.Entry<Object, Object> entry = i.next();
+                sb.append('"').append(entry.getKey().toString()).append("\": ");
+                sb.append(new JsonValue(entry.getValue()).toString()); // recursion
                 if (i.hasNext()) {
                     sb.append(", ");
                 }

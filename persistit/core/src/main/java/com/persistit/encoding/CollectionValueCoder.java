@@ -12,6 +12,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit.encoding;
@@ -44,7 +45,6 @@ import com.persistit.exception.ConversionException;
  * <li>java.util.LinkedHashMap (Java 1.4+)</li>
  * <li>java.util.LinkedHashSet (Java 1.4+)</li>
  * </ul>
- * </p>
  * <p>
  * The stored data consist only of items accessible through the
  * <code>Collection</code> or <code>Map</code> interfaces. For example,
@@ -158,19 +158,17 @@ public class CollectionValueCoder implements ValueRenderer, ValueDisplayer {
      *            <code>null</code>.
      * @return An <code>Object</code> having the same class as the suppled
      *         <code>clazz</code> parameter.
-     * @throws ConversionException
+     * @throws ConversionException if the value cannot be converted
      */
     @Override
     public Object get(final Value value, final Class<?> clazz, final CoderContext context) throws ConversionException {
         try {
-            final Object target = clazz.newInstance();
+            final Object target = clazz.getDeclaredConstructor().newInstance();
             value.registerEncodedObject(target);
             render(value, target, clazz, context);
             return target;
-        } catch (final InstantiationException ce) {
-            throw new ConversionException(ce + " while decoding a Collection value");
-        } catch (final IllegalAccessException iae) {
-            throw new ConversionException(iae + " while decoding a Collection value");
+        } catch (final ReflectiveOperationException e) {
+            throw new ConversionException(e + " while decoding a Collection value");
         }
     }
 
@@ -202,7 +200,7 @@ public class CollectionValueCoder implements ValueRenderer, ValueDisplayer {
      *            operation. (See {@link CoderContext}.) The default value is
      *            <code>null</code>.
      * 
-     * @throws ConversionException
+     * @throws ConversionException if the value cannot be converted
      */
     @Override
     public void render(final Value value, final Object target, final Class clazz, final CoderContext context)
@@ -274,7 +272,7 @@ public class CollectionValueCoder implements ValueRenderer, ValueDisplayer {
      *            operation. (See {@link CoderContext}.) The default value is
      *            <code>null</code>.
      * 
-     * @throws ConversionException
+     * @throws ConversionException if the value cannot be converted
      */
     @Override
     public void display(final Value value, final StringBuilder target, final Class<?> clazz, final CoderContext context)

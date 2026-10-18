@@ -12,26 +12,39 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions copyright 2020-2026 3A Systems LLC.
  */
 
 package org.forgerock.audit.handlers.csv;
 
 import static java.nio.charset.StandardCharsets.*;
+import static java.nio.file.StandardOpenOption.APPEND;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.forgerock.audit.AuditServiceBuilder.*;
 import static org.forgerock.audit.AuditServiceProxy.*;
 import static org.forgerock.audit.handlers.csv.CsvAuditEventHandler.*;
+import static org.forgerock.audit.handlers.csv.SecureCsvWriterTest.KEYSTORE_PASSWORD;
+import static org.forgerock.audit.handlers.csv.SecureCsvWriterTest.assertThreadsTerminate;
 import static org.forgerock.json.JsonValue.*;
-import static org.forgerock.util.test.assertj.AssertJPromiseAssert.assertThat;
 import static org.mockito.Mockito.*;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
 
 import org.forgerock.audit.AuditService;
 import org.forgerock.audit.AuditServiceBuilder;
@@ -40,15 +53,23 @@ import org.forgerock.audit.events.EventTopicsMetaData;
 import org.forgerock.audit.events.handlers.AuditEventHandler;
 import org.forgerock.audit.events.handlers.FileBasedEventHandlerConfiguration.FileRotation;
 import org.forgerock.audit.handlers.csv.CsvAuditEventHandlerConfiguration.EventBufferingConfiguration;
+import org.forgerock.audit.handlers.csv.CsvSecureVerifier.VerificationResult;
 import org.forgerock.audit.json.AuditJsonConfig;
 import org.forgerock.audit.providers.DefaultKeyStoreHandlerProvider;
 import org.forgerock.audit.providers.KeyStoreHandlerProvider;
+import org.forgerock.audit.retention.FileNamingPolicy;
+import org.forgerock.audit.retention.TimeStampFileNamingPolicy;
 import org.forgerock.audit.secure.JcaKeyStoreHandler;
 import org.forgerock.audit.secure.KeyStoreHandler;
 import org.forgerock.audit.secure.KeyStoreHandlerDecorator;
+import org.forgerock.audit.secure.KeyStoreSecureStorage;
+import org.forgerock.audit.util.GzipUtil;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.resource.ActionRequest;
+import org.forgerock.json.resource.BadRequestException;
 import org.forgerock.json.resource.CreateRequest;
+import org.forgerock.json.resource.InternalServerErrorException;
+import org.forgerock.json.resource.NotFoundException;
 import org.forgerock.json.resource.QueryFilters;
 import org.forgerock.json.resource.QueryRequest;
 import org.forgerock.json.resource.QueryResourceHandler;
@@ -59,9 +80,16 @@ import org.forgerock.json.resource.ResourceException;
 import org.forgerock.json.resource.ResourceResponse;
 import org.forgerock.services.context.Context;
 import org.forgerock.services.context.RootContext;
+import org.forgerock.util.encode.Base64;
 import org.forgerock.util.promise.Promise;
 import org.forgerock.util.promise.ResultHandler;
+import org.forgerock.util.test.assertj.AssertJPromiseAssert;
+import org.joda.time.LocalDateTime;
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
 import org.mockito.ArgumentCaptor;
+import org.supercsv.prefs.CsvPreference;
+import org.testng.SkipException;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
@@ -154,7 +182,7 @@ public class CsvAuditEventHandlerTest {
                 csvHandler.publishEvent(context, "access", createRequest.getContent());
 
         //then
-        assertThat(promise)
+        AssertJPromiseAssert.assertThat(promise)
                 .succeeded()
                 .withObject()
                 .isInstanceOf(ResourceResponse.class);
@@ -182,7 +210,7 @@ public class CsvAuditEventHandlerTest {
                 csvHandler.readEvent(context, "access", readRequest.getResourcePathObject().tail(1).toString());
 
         //then
-        assertThat(promise)
+        AssertJPromiseAssert.assertThat(promise)
                 .succeeded()
                 .withObject()
                 .isInstanceOf(ResourceResponse.class);
@@ -230,11 +258,82 @@ public class CsvAuditEventHandlerTest {
                 csvHandler.queryEvents(context, "access", queryRequest, queryResourceHandler);
 
         //then
-        assertThat(promise).succeeded();
+        AssertJPromiseAssert.assertThat(promise).succeeded();
         verify(queryResourceHandler).handleResource(resourceCaptor.capture());
 
         final ResourceResponse resource = resourceCaptor.getValue();
         assertResourceEquals(resource, event);
+    }
+
+    @DataProvider
+    private Object[][] noEventYetData() {
+        return new Object[][] {
+                // label, rotate action before the read ?
+                { "after startup", false },
+                { "after the rotate action", true }
+        };
+    }
+
+    @Test(dataProvider = "noEventYetData")
+    public void testReadingTamperEvidentAuditLogWithNoEventYet(String label, boolean rotate) throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        logDirectory.toFile().deleteOnExit();
+        final CsvAuditEventHandler csvHandler =
+                csvAuditEventHandler().loggingTo(logDirectory).withSecureLoggingEnabled().build();
+        final Context context = new RootContext();
+        try {
+            leaveTamperEvidentFileWithNoEvent(csvHandler, logDirectory, label, rotate);
+
+            final Promise<ResourceResponse, ResourceException> promise =
+                    csvHandler.readEvent(context, "access", "_id1");
+
+            AssertJPromiseAssert.assertThat(promise)
+                    .as("when " + label)
+                    .failedWithException()
+                    .isInstanceOf(NotFoundException.class);
+        } finally {
+            csvHandler.shutdown();
+        }
+    }
+
+    @Test(dataProvider = "noEventYetData")
+    public void testQueryOnTamperEvidentAuditLogWithNoEventYet(String label, boolean rotate) throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        logDirectory.toFile().deleteOnExit();
+        final CsvAuditEventHandler csvHandler =
+                csvAuditEventHandler().loggingTo(logDirectory).withSecureLoggingEnabled().build();
+        final Context context = new RootContext();
+        final QueryResourceHandler queryResourceHandler = mock(QueryResourceHandler.class);
+        try {
+            leaveTamperEvidentFileWithNoEvent(csvHandler, logDirectory, label, rotate);
+
+            final Promise<QueryResponse, ResourceException> promise = csvHandler.queryEvents(context, "access",
+                    Requests.newQueryRequest("access").setQueryFilter(QueryFilters.parse("true")),
+                    queryResourceHandler);
+
+            AssertJPromiseAssert.assertThat(promise).as("when " + label).succeeded();
+            verify(queryResourceHandler, never()).handleResource(any(ResourceResponse.class));
+        } finally {
+            csvHandler.shutdown();
+        }
+    }
+
+    /**
+     * The tamper evident writer writes the header with the first event, so the audit file is empty after startup, and
+     * after the rotate action of a topic without file rotation until the next event.
+     */
+    private void leaveTamperEvidentFileWithNoEvent(CsvAuditEventHandler csvHandler, Path logDirectory, String label,
+            boolean rotate) throws Exception {
+        if (rotate) {
+            final Context context = new RootContext();
+            csvHandler.publishEvent(context, "access", buildEvent(1)).getOrThrow();
+            final ActionRequest actionRequest = Requests.newActionRequest("access", ROTATE_FILE_ACTION_NAME)
+                    .setAdditionalParameter(ACTION_PARAM_TARGET_HANDLER, "csv");
+            csvHandler.handleAction(context, "access", actionRequest).getOrThrow();
+        }
+        assertThat(logDirectory.resolve(SECURE_CSV_FILENAME_PREFIX + "access.csv").toFile())
+                .as("when " + label)
+                .isEmpty();
     }
 
     private CreateRequest makeCreateRequest() {
@@ -268,7 +367,7 @@ public class CsvAuditEventHandlerTest {
         final Promise<ResourceResponse, ResourceException> promise =
                 auditEventHandler.publishEvent(context, "access", createRequest.getContent());
 
-        assertThat(promise)
+        AssertJPromiseAssert.assertThat(promise)
                 .succeeded()
                 .isInstanceOf(ResourceResponse.class);
 
@@ -295,6 +394,47 @@ public class CsvAuditEventHandlerTest {
         String expectedContent = "\"_id\",\"timestamp\",\"transactionId\"\n"
                 + "\"1\",\"123456\",\"A10000\"";
         assertThat(logDirectory.resolve("access.csv").toFile()).hasContent(expectedContent);
+    }
+
+    @Test
+    public void testShutdownClosesEveryTamperEvidentWriterWhenOneFailsToClose() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        logDirectory.toFile().deleteOnExit();
+        final CsvAuditEventHandlerBuilder builder =
+                csvAuditEventHandler().loggingTo(logDirectory).withSecureLoggingEnabled();
+        // A second topic, so that a writer is left to close after the first one fails.
+        final Map<String, JsonValue> topics = new LinkedHashMap<>();
+        topics.put("access", builder.eventTopicsMetaData.getSchema("access"));
+        topics.put("activity", builder.eventTopicsMetaData.getSchema("access"));
+        final EventTopicsMetaData eventTopicsMetaData = new EventTopicsMetaData(topics);
+        builder.config.setTopics(eventTopicsMetaData.getTopics());
+        // The writers open at startup, and their schedulers create their threads in the group of that thread.
+        final ThreadGroup writerThreads = new ThreadGroup("CsvAuditEventHandlerTest");
+        final FutureTask<CsvAuditEventHandler> creation = new FutureTask<>(() -> {
+            final CsvAuditEventHandler handler =
+                    new CsvAuditEventHandler(builder.config, eventTopicsMetaData, builder.keystoreHandlerProvider);
+            handler.startup();
+            return handler;
+        });
+        final Thread creator = new Thread(writerThreads, creation);
+        creator.start();
+        final CsvAuditEventHandler csvHandler = creation.get();
+        creator.join();
+
+        final Context context = new RootContext();
+        for (String topic : topics.keySet()) {
+            csvHandler.publishEvent(context, topic, buildEvent());
+            // A keystore cannot be stored over a directory, so the final signature of every writer fails.
+            final File keyStoreFile =
+                    logDirectory.resolve(SECURE_CSV_FILENAME_PREFIX + topic + ".csv.keystore").toFile();
+            assertThat(keyStoreFile.delete()).isTrue();
+            assertThat(keyStoreFile.mkdir()).isTrue();
+        }
+        assertThat(writerThreads.activeCount()).as("scheduler threads").isEqualTo(topics.size());
+
+        assertThatThrownBy(csvHandler::shutdown).isInstanceOf(InternalServerErrorException.class);
+        // The scheduler threads are not daemon threads, they would keep the JVM from exiting.
+        assertThreadsTerminate(writerThreads);
     }
 
     @DataProvider
@@ -334,6 +474,162 @@ public class CsvAuditEventHandlerTest {
 
         assertThat(logDirectory.resolve("access.csv").toFile()).as("when " + label + " in " + logDirectory.toString())
             .hasContent("\"_id\",\"timestamp\",\"transactionId\"\n");
+        // the default rotation file suffix ends with .gz
+        final File[] rotatedFiles = logDirectory.toFile().listFiles((dir, name) -> !name.equals("access.csv"));
+        assertThat(rotatedFiles).as("when " + label).hasSize(1);
+        rotatedFiles[0].deleteOnExit();
+        assertThat(rotatedFiles[0].getName()).endsWith(".gz");
+        try (InputStream in = new GZIPInputStream(new FileInputStream(rotatedFiles[0]))) {
+            assertThat(new String(in.readAllBytes(), UTF_8)).as("when " + label).contains("\"A10000\"");
+        }
+    }
+
+    @Test(dataProvider = "rotateActionData")
+    public void testActionToRotateTamperEvidentFile(String label, boolean isRotationEnabled) throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        logDirectory.toFile().deleteOnExit();
+        final CsvAuditEventHandlerBuilder csvAuditEventHandlerBuilder =
+                csvAuditEventHandler().loggingTo(logDirectory).withSecureLoggingEnabled();
+        if (isRotationEnabled) {
+            csvAuditEventHandlerBuilder.withRotationEnabled();
+        }
+        final CsvAuditEventHandler csvHandler = csvAuditEventHandlerBuilder.build();
+
+        final Context context = new RootContext();
+        try {
+            csvHandler.publishEvent(context, "access", buildEvent(1));
+            ActionRequest actionRequest = Requests.newActionRequest("access", ROTATE_FILE_ACTION_NAME)
+                    .setAdditionalParameter(ACTION_PARAM_TARGET_HANDLER, "csv");
+            csvHandler.handleAction(context, "access", actionRequest);
+        } finally {
+            csvHandler.shutdown();
+        }
+
+        // the archive is verified with its own keystore, as the CLI verifies it
+        final KeyStoreHandlerDecorator keyStoreHandler = new KeyStoreHandlerDecorator(
+                new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, KEYSTORE_FILENAME, KEYSTORE_PASSWORD));
+        final String archiveKeyStorePassword = Base64.encode(
+                keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded());
+        final File liveFile = logDirectory.resolve(SECURE_CSV_FILENAME_PREFIX + "access.csv").toFile();
+        // with the prefix that withRotationEnabled() configures
+        final FileNamingPolicy fileNamingPolicy =
+                new TimeStampFileNamingPolicy(liveFile, null, isRotationEnabled ? "prefix" : null);
+        final List<VerificationResult> verificationResults = new CsvSecureArchiveVerifier(fileNamingPolicy,
+                archiveKeyStorePassword, keyStoreHandler.readPublicKeyFromKeyStore(CsvSecureConstants.ENTRY_SIGNATURE),
+                CsvPreference.EXCEL_PREFERENCE).verify();
+        assertThat(verificationResults).as("when " + label).hasSize(1);
+        final VerificationResult verificationResult = verificationResults.get(0);
+        // the default rotation file suffix ends with .gz
+        assertThat(verificationResult.getArchiveFile().getName()).as("when " + label).endsWith(".gz");
+        assertThat(verificationResult.hasPassedVerification())
+                .as("when " + label + ": " + verificationResult.getFailureReason())
+                .isTrue();
+    }
+
+    @Test
+    public void testActionToRotateTamperEvidentFileKeepsFileWhenKeyStoreCannotBeRenamed() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        logDirectory.toFile().deleteOnExit();
+        final File liveFile = logDirectory.resolve(SECURE_CSV_FILENAME_PREFIX + "access.csv").toFile();
+        final CsvAuditEventHandler csvHandler =
+                csvAuditEventHandler().loggingTo(logDirectory).withSecureLoggingEnabled().build();
+
+        final Context context = new RootContext();
+        try {
+            csvHandler.publishEvent(context, "access", buildEvent(1));
+            // A file cannot be renamed onto a directory. The archive name has the current second in the default
+            // rotation suffix, so the keystore name of every archive name of the next 30 s is taken by one.
+            final DateTimeFormatter rotationSuffix = DateTimeFormat.forPattern("-yyyy.MM.dd-HH.mm.ss");
+            final LocalDateTime now = LocalDateTime.now();
+            for (int second = -1; second <= 30; second++) {
+                Files.createDirectory(logDirectory.resolve(
+                        liveFile.getName() + now.plusSeconds(second).toString(rotationSuffix) + ".gz.keystore"));
+            }
+            ActionRequest actionRequest = Requests.newActionRequest("access", ROTATE_FILE_ACTION_NAME)
+                    .setAdditionalParameter(ACTION_PARAM_TARGET_HANDLER, "csv");
+            AssertJPromiseAssert.assertThat(csvHandler.handleAction(context, "access", actionRequest))
+                    .failedWithException()
+                    .isInstanceOf(BadRequestException.class);
+            csvHandler.publishEvent(context, "access", buildEvent(2));
+        } finally {
+            csvHandler.shutdown();
+        }
+
+        // the audit file is not archived, and the writer resumed it with its keys
+        assertThat(logDirectory.toFile().listFiles((dir, name) -> !name.endsWith(".keystore")))
+                .containsExactly(liveFile);
+        assertThat(liveFile).content(UTF_8).contains("\"_id1\"", "\"_id2\"");
+        final KeyStoreHandlerDecorator keyStoreHandler = new KeyStoreHandlerDecorator(
+                new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, KEYSTORE_FILENAME, KEYSTORE_PASSWORD));
+        final KeyStoreHandler liveKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE,
+                CsvSecureUtils.keyStoreFile(liveFile).getPath(), Base64.encode(
+                        keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded()));
+        final VerificationResult verificationResult = new CsvSecureVerifier(liveFile, CsvPreference.EXCEL_PREFERENCE,
+                new KeyStoreSecureStorage(liveKeyStoreHandler,
+                        keyStoreHandler.readPublicKeyFromKeyStore(CsvSecureConstants.ENTRY_SIGNATURE))).verify();
+        assertThat(verificationResult.hasPassedVerification())
+                .as(verificationResult.getFailureReason())
+                .isTrue();
+    }
+
+    @Test
+    public void testActionToRotateFileCompressesOutsideHandlerMonitor() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvAuditEventHandlerTest");
+        final CsvAuditEventHandler csvHandler = csvAuditEventHandler().loggingTo(logDirectory).build();
+        final Context context = new RootContext();
+        final ActionRequest actionRequest = Requests.newActionRequest("access", ROTATE_FILE_ACTION_NAME)
+                .setAdditionalParameter(ACTION_PARAM_TARGET_HANDLER, "csv");
+        final ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            csvHandler.publishEvent(context, "access", buildEvent());
+            // random bytes compress slowly, so compressing this file takes far longer than a rotation
+            final byte[] chunk = new byte[1024 * 1024];
+            final Random random = new Random(0);
+            try (OutputStream out = Files.newOutputStream(logDirectory.resolve("access.csv"), APPEND)) {
+                for (int i = 0; i < 16; i++) {
+                    random.nextBytes(chunk);
+                    out.write(chunk);
+                }
+            }
+
+            final Future<?> firstRotation =
+                    executor.submit(() -> csvHandler.handleAction(context, "access", actionRequest).getOrThrow());
+            final File renamedFile = GzipUtil.removeGzipSuffix(awaitArchive(logDirectory));
+            if (!renamedFile.exists()) {
+                throw new SkipException("The rotated file was compressed before the test could observe it");
+            }
+            // the second rotation takes the handler monitor, so it would wait for a compression running under it
+            csvHandler.handleAction(context, "access", actionRequest).getOrThrow();
+            assertThat(renamedFile).as("rotated file still being compressed").exists();
+            firstRotation.get();
+
+            // the second rotation does not take the name of the file still being compressed
+            final File[] rotatedFiles = logDirectory.toFile().listFiles((dir, name) -> !name.equals("access.csv"));
+            assertThat(rotatedFiles).hasSize(2);
+            assertThat(rotatedFiles).allMatch(file -> file.getName().endsWith(".gz"));
+        } finally {
+            executor.shutdown();
+            executor.awaitTermination(30, TimeUnit.SECONDS);
+            csvHandler.shutdown();
+            // the files are large, so do not leave them until the JVM exits
+            for (final File file : logDirectory.toFile().listFiles()) {
+                file.delete();
+            }
+            logDirectory.toFile().delete();
+        }
+    }
+
+    /** Waits until the only rotated file appears under its archive name, and returns it. */
+    private static File awaitArchive(final Path logDirectory) throws InterruptedException {
+        final long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
+        while (System.currentTimeMillis() < deadline) {
+            final File[] archives = logDirectory.toFile().listFiles((dir, name) -> name.endsWith(".gz"));
+            if (archives.length > 0) {
+                return archives[0];
+            }
+            Thread.sleep(1);
+        }
+        throw new AssertionError("No archive in " + logDirectory);
     }
 
     @Test
@@ -423,6 +719,8 @@ public class CsvAuditEventHandlerTest {
                     new CsvAuditEventHandlerConfiguration.CsvSecurity();
             csvSecurity.setEnabled(true);
             csvSecurity.setKeyStoreHandlerName("csvSecure");
+            // the close of the writer signs its last rows
+            csvSecurity.setSignatureInterval("5 minutes");
             config.setSecurity(csvSecurity);
             keystoreHandlerProvider = setupKeyStoreHandlerProvider();
             return this;
@@ -469,11 +767,9 @@ public class CsvAuditEventHandlerTest {
         }
 
         private KeyStoreHandlerProvider setupKeyStoreHandlerProvider() throws Exception {
-            final String keystorePath = new File(System.getProperty("java.io.tmpdir"), "secure-audit.jks")
-                    .getAbsolutePath();
             DefaultKeyStoreHandlerProvider provider = new DefaultKeyStoreHandlerProvider();
             final KeyStoreHandlerDecorator keyStoreHandler = new KeyStoreHandlerDecorator(
-                    new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, keystorePath, "forgerock"));
+                    new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, KEYSTORE_FILENAME, KEYSTORE_PASSWORD));
             provider.registerKeyStoreHandler("csvSecure", keyStoreHandler);
 
             return provider;

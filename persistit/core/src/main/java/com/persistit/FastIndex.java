@@ -1,6 +1,7 @@
 /**
  * Copyright 2011-2012 Akiban Technologies, Inc.
- * 
+ * Portions Copyrighted 2026 3A Systems, LLC.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,6 +13,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit;
@@ -26,12 +28,12 @@ import com.persistit.util.Debug;
  * maintain a smaller number of FastIndex instances than Buffer indexes. When a
  * Buffer needs a FastIndex, {@link BufferPool#allocFastIndex()} method steals a
  * FastIndex from some other Buffer where it currently isn't needed.
- * <p />
+ * <p>
  * FastIndex is based on the ebc (elided byte count) of keys in the page. Its
  * purpose is to allow the key search algorithm skip over irrelevant keys having
  * larger ebc values, or when a "run" of keys has the same ebc value, to perform
  * a binary search.
- * <p />
+ * <p>
  * An element in the array denotes either one plus the number of successor key
  * blocks with deeper elision (larger ebc values) having the same ebc (elided
  * byte count) or the number of successor key block having the same ebc value.
@@ -41,7 +43,7 @@ import com.persistit.util.Debug;
  * blocks in a run having identical ebc values). To distinguish this cases in
  * the array, cross counts are stored as negative numbers while run counts are
  * positive.
- * <p />
+ * <p>
  * Consider a page having the following sequence of keys. The ebc value for each
  * key indicates the number of bytes in that key which match the preceding key.
  * Non-zero values in the crossCount and runCount fields indicate values
@@ -125,7 +127,7 @@ import com.persistit.util.Debug;
  * <td></td>
  * </tr>
  * </table>
- * <p />
+ * <p>
  * The key search algorithm uses these values to accelerate searching for a key
  * in the page. For example, suppose the key being sought is "D". Then the
  * {@link Buffer#findKey(Key)} starts by comparing "D" with A, determines that
@@ -274,7 +276,6 @@ class FastIndex {
         int ebc0;
         int ebc = -1;
         int ebc2 = Buffer.decodeKeyBlockEbc(_buffer.getInt(start));
-        int faultAt = -1;
 
         for (int i = 0, p = start; p < end; i++, p += Buffer.KEYBLOCK_LENGTH) {
             ebc0 = ebc;
@@ -283,16 +284,10 @@ class FastIndex {
                     + Buffer.KEYBLOCK_LENGTH)) : 0;
             if (ebc2 > ebc) {
                 if (getRunCount(i) >= 0) {
-                    if (faultAt < 0) {
-                        faultAt = i;
-                    }
                     return false;
                 }
             } else if (ebc > ebc0) {
                 if (getRunCount(i) < 0) {
-                    if (faultAt < 0) {
-                        faultAt = i;
-                    }
                     return false;
                 }
             }
@@ -513,11 +508,11 @@ class FastIndex {
      * Fixes up the elements surrounding insertion of keyblock that causes the
      * successor ebc to get fixed up.
      * 
-     * @param insertIndex
-     * @param runIndex
-     * @param runCount
-     * @param ebc
-     * @param successorEbc
+     * @param insertIndex the index at which the new keyblock is inserted
+     * @param runIndex the index of the first keyblock in the affected run
+     * @param runCount the number of keyblocks in the run
+     * @param ebc the elided byte count at the head of the run
+     * @param successorEbc the elided byte count of the successor keyblock
      */
     private void fixupSuccessor(final int lastIndex, final int insertIndex, final int runIndex, final int runCount,
             final int ebc, final int successorEbc) {

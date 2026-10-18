@@ -12,6 +12,7 @@
  * information: "Portions Copyrighted [year] [name of copyright owner]".
  *
  * Copyright 2011-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.json.schema;
@@ -36,6 +37,7 @@ import java.util.Scanner;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.forgerock.json.JsonValue;
+import org.forgerock.json.JsonValueFunctions;
 import org.forgerock.json.schema.validator.Constants;
 import org.forgerock.json.schema.validator.ErrorHandler;
 import org.forgerock.json.schema.validator.FailFastErrorHandler;
@@ -164,6 +166,7 @@ public final class Main {
             validateDirectory(schemaFile);
             FileFilter filter = new FileFilter() {
 
+                @Override
                 public boolean accept(File f) {
                     return (f.isDirectory()) || (f.getName().endsWith(".json"));
                 }
@@ -183,8 +186,11 @@ public final class Main {
     }
 
     private void loadSchema(URI base, File schemaFile) throws IOException {
-        JsonValue schemaMap = new JsonValue(MAPPER.readValue(new FileInputStream(schemaFile), Map.class));
-        URI id = schemaMap.get(Constants.ID).required().asURI();
+        final JsonValue schemaMap;
+        try (final FileInputStream in = new FileInputStream(schemaFile)) {
+            schemaMap = new JsonValue(MAPPER.readValue(in, Map.class));
+        }
+        URI id = schemaMap.get(Constants.ID).required().as(JsonValueFunctions.uri());
         Validator v = ObjectValidatorFactory.getTypeValidator(schemaMap.asMap());
         if (!id.isAbsolute()) {
             id = base.resolve(id);
@@ -199,9 +205,9 @@ public final class Main {
      * Files found; the List is sorted using File.compareTo().
      *
      * @param aStartingDir is a valid directory, which can be read.
-     * @param filter
-     * @return
-     * @throws java.io.FileNotFoundException
+     * @param filter the filter used to select which files to include.
+     * @return the list of files found beneath the starting directory.
+     * @throws java.io.FileNotFoundException if the starting directory does not exist or cannot be read.
      */
     private List<File> getFileListingNoSort(File aStartingDir, FileFilter filter) throws FileNotFoundException {
         List<File> result = new ArrayList<>();
@@ -222,8 +228,8 @@ public final class Main {
     /**
      * Directory is valid if it exists, does not represent a file, and can be read.
      *
-     * @param aDirectory
-     * @throws java.io.FileNotFoundException
+     * @param aDirectory the directory to validate.
+     * @throws java.io.FileNotFoundException if the directory does not exist.
      */
     private void validateDirectory(File aDirectory) throws FileNotFoundException {
         if (aDirectory == null) {
@@ -243,7 +249,7 @@ public final class Main {
     //Validation
 
     private void validate(JsonValue value) throws SchemaException, URISyntaxException {
-        URI schemaId = value.get(Constants.SCHEMA).asURI();
+        URI schemaId = value.get(Constants.SCHEMA).as(JsonValueFunctions.uri());
         if (null == schemaId && isEmptyOrBlank(schemaURI)) {
             System.out.println("-i (--id) must be an URI");
             return;
@@ -254,7 +260,7 @@ public final class Main {
         Validator validator = schemaCache.get(schemaId);
         if (null != validator) {
             if (verbose) {
-                final boolean[] valid = new boolean[1];
+                final boolean[] valid = { true };
                 validator.validate(value.getObject(), null, new ErrorHandler() {
                     @Override
                     public void error(ValidationException exception) throws SchemaException {
@@ -267,7 +273,7 @@ public final class Main {
                     public void assembleException() throws ValidationException {
                     }
                 });
-                if (valid.length == 0) {
+                if (valid[0]) {
                     System.out.println("OK - Object is valid!");
                 }
             } else {

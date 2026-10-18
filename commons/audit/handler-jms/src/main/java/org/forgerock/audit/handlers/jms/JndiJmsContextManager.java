@@ -12,12 +12,13 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 
 package org.forgerock.audit.handlers.jms;
 
-import javax.jms.ConnectionFactory;
-import javax.jms.Topic;
+import jakarta.jms.ConnectionFactory;
+import jakarta.jms.Topic;
 import javax.naming.InitialContext;
 import javax.naming.NamingException;
 import java.util.Hashtable;
@@ -66,6 +67,7 @@ class JndiJmsContextManager implements JmsContextManager {
      * @return The {@link Topic JMS topic} to use for JMS publish/subscribe functionality.
      * @throws InternalServerErrorException If unable to retrieve the {@link Topic JMS topic}.
      */
+    @Override
     public Topic getTopic() throws InternalServerErrorException {
         try {
             if (topic == null) {
@@ -82,6 +84,7 @@ class JndiJmsContextManager implements JmsContextManager {
      * @return the {@link ConnectionFactory JMS connection factory} to use to connect to JMS services.
      * @throws InternalServerErrorException If unable to retrieve the {@link ConnectionFactory JMS connection factory}.
      */
+    @Override
     public ConnectionFactory getConnectionFactory() throws InternalServerErrorException {
         try {
             if (connectionFactory == null) {

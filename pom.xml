@@ -21,13 +21,15 @@
  with the fields enclosed by brackets [] replaced by
  your own identifying information:
  "Portions Copyrighted [year] [name of copyright owner]"
+
+  Portions Copyright 2017-2026 3A Systems, LLC.
 -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.openidentityplatform.commons</groupId>
     <artifactId>parent</artifactId>
-    <version>2.1.2-SNAPSHOT</version>
+    <version>3.2.2-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>${project.groupId}.${project.artifactId}</name>
     <description>Parent POM for Open Identity Platform Community projects. Provides default project build configuration.</description>
@@ -68,16 +70,29 @@
     		<url>https://github.com/OpenIdentityPlatform/commons</url>
     	</developer>
     </developers>
-	<distributionManagement>
-		<repository>
-			<id>ossrh</id>
-			<url>https://oss.sonatype.org/service/local/staging/deploy/maven2</url>
-		</repository>
-		<snapshotRepository>
-			<id>ossrh</id>
-			<url>https://oss.sonatype.org/content/repositories/snapshots</url>
-		</snapshotRepository>
-	</distributionManagement>
+    <repositories>
+	<repository>
+	    <name>Central Portal Snapshots</name>
+	    <id>central-portal-snapshots</id>
+	    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+	    <releases>
+		<enabled>false</enabled>
+	    </releases>
+	    <snapshots>
+		<enabled>true</enabled>
+	    </snapshots>
+	</repository>
+    </repositories>
+	<pluginRepositories>
+		<pluginRepository>
+			<name>Central Portal Snapshots</name>
+		    <id>central-portal-snapshots</id>
+		    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+			<snapshots>
+				<enabled>true</enabled>
+			</snapshots>
+		</pluginRepository>
+	</pluginRepositories>
 	<modules>
 		<module>maven-external-dependency-plugin/maven-external-dependency-plugin</module>
 		<module>build-tools</module>
@@ -100,9 +115,9 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- maven-compiler-plugin http://maven.apache.org/plugins/maven-compiler-plugin -->
-        <mavenCompilerPluginVersion>3.11.0</mavenCompilerPluginVersion>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <maven.compiler.source>1.8</maven.compiler.source>
+        <mavenCompilerPluginVersion>3.13.0</mavenCompilerPluginVersion>
+        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.source>11</maven.compiler.source>
 
         <!-- maven-enforcer-plugin -->
         <maven.min.version>3.0.1</maven.min.version>
@@ -112,7 +127,7 @@
         <findbugsPluginVersion>3.0.1</findbugsPluginVersion>
 
         <!-- maven-javadoc-plugin -->
-        <javadocPluginVersion>3.0.1</javadocPluginVersion>
+        <javadocPluginVersion>3.12.0</javadocPluginVersion>
         <!-- build-tools stylesheet org/forgerock/javadoc/javadoc.css
              does not work with JDK7 -->
         <javadocStylesheet />
@@ -187,9 +202,16 @@
         <!-- this property makes sure NetBeans 6.8+ picks up some formatting rules from checkstyle -->
         <netbeans.checkstyle.format>true</netbeans.checkstyle.format>
 
-        <jackson.version>2.14.0-rc1</jackson.version>
-        <slf4j.version>1.7.36</slf4j.version>
+        <!-- GHSA-r7wm-3cxj-wff9, CVE-2026-54512, CVE-2026-54513 are fixed in 2.18.8 -->
+        <jackson.version>2.18.11</jackson.version>
+        <slf4j.version>2.0.17</slf4j.version>
         <swagger.version>1.6.11</swagger.version>
+        <rhino.version>1.7.15.1</rhino.version>
+        <jetty.version>11.0.25</jetty.version>
+        <grizzly-framework.version>3.0.1</grizzly-framework.version>
+        <servlet-api.version>5.0.0</servlet-api.version>
+        <cassandra.version>4.19.2</cassandra.version><!--after version update, check netty version-->
+        <cassandra-all.version>5.0.7</cassandra-all.version>
     </properties>
 
     <prerequisites>
@@ -267,7 +289,17 @@
 			<dependency>
 				<groupId>com.google.guava</groupId>
 				<artifactId>guava</artifactId>
-				<version>32.1.1-jre</version>
+				<version>33.4.8-jre</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>com.google.j2objc</groupId>
+                        <artifactId>j2objc-annotations</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>listenablefuture</artifactId>
+                    </exclusion>
+                </exclusions>
 			</dependency>
 
 			<dependency>
@@ -287,99 +319,30 @@
 			<dependency>
 				<groupId>org.assertj</groupId>
 				<artifactId>assertj-core</artifactId>
-				<version>2.4.1</version>
+				<version>3.27.7</version>
+                <scope>test</scope>
 			</dependency>
 
             <dependency>
                 <groupId>com.sun.mail</groupId>
-                <artifactId>javax.mail</artifactId>
-                <version>1.6.2</version>
-            </dependency>
-            
-			<dependency>
-				<groupId>com.fasterxml.jackson.core</groupId>
-				<artifactId>jackson-core</artifactId>
-				<version>${jackson.version}</version>
-			</dependency>
-			<dependency>
-				<groupId>com.fasterxml.jackson.core</groupId>
-				<artifactId>jackson-databind</artifactId>
-				<version>${jackson.version}</version>
-			</dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
-                <artifactId>jackson-annotations</artifactId>
-                <version>${jackson.version}</version>
+                <artifactId>jakarta.mail</artifactId>
+                <version>2.0.2</version>
             </dependency>
             <dependency>
-                <groupId>com.fasterxml.jackson.module</groupId>
-                <artifactId>jackson-module-jsonSchema</artifactId>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
                 <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
             <dependency>
-                <groupId>com.fasterxml.jackson.dataformat</groupId>
-                <artifactId>jackson-dataformat-csv</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.datatype</groupId>
-                <artifactId>jackson-datatype-jdk8</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.module</groupId>
-                <artifactId>jackson-module-paranamer</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.module</groupId>
-                <artifactId>jackson-module-scala_2.13</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.datatype</groupId>
-                <artifactId>jackson-datatype-json-org</artifactId>
-                <version>${jackson.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.json</groupId>
-                        <artifactId>json</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.module</groupId>
-                <artifactId>jackson-module-afterburner</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.dataformat</groupId>
-                <artifactId>jackson-dataformat-xml</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.module</groupId>
-                <artifactId>jackson-module-jaxb-annotations</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.dataformat</groupId>
-                <artifactId>jackson-dataformat-yaml</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.dataformat</groupId>
-                <artifactId>jackson-dataformat-cbor</artifactId>
-                <version>${jackson.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.datatype</groupId>
-                <artifactId>jackson-datatype-joda</artifactId>
-                <version>${jackson.version}</version>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bc-jdk18on-bom</artifactId>
+                <version>1.86</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
 
-
-            
 			<dependency>
 				<groupId>org.openidentityplatform.commons.guice</groupId>
 				<artifactId>core</artifactId>
@@ -639,6 +602,42 @@
                 <version>${project.version}</version>
             </dependency>
             <dependency>
+                <groupId>org.openidentityplatform.commons.script</groupId>
+                <artifactId>javascript</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.openidentityplatform.commons.script</groupId>
+                <artifactId>groovy</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.openidentityplatform.commons.launcher</groupId>
+                <artifactId>launcher</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.openidentityplatform.commons.launcher</groupId>
+                <artifactId>launcher-zip</artifactId>
+                <type>zip</type>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.openidentityplatform.commons.script</groupId>
+                <artifactId>common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mozilla</groupId>
+                <artifactId>rhino</artifactId>
+                <version>${rhino.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mozilla</groupId>
+                <artifactId>rhino-engine</artifactId>
+                <version>${rhino.version}</version>
+            </dependency>
+            <dependency>
 		        <groupId>org.asciidoctor</groupId>
 		        <artifactId>asciidoctorj</artifactId>
 		        <version>2.5.3</version>
@@ -658,9 +657,9 @@
 		      <version>${project.version}</version>
 		    </dependency>
             <dependency>
-                <groupId>javax.servlet</groupId>
-                <artifactId>javax.servlet-api</artifactId>
-                <version>4.0.1</version>
+                <groupId>jakarta.servlet</groupId>
+                <artifactId>jakarta.servlet-api</artifactId>
+                <version>${servlet-api.version}</version>
                 <scope>provided</scope>
             </dependency>
 
@@ -764,26 +763,26 @@
 				<artifactId>FastInfoset</artifactId>
 				<version>1.2.17</version>
 			</dependency>
-			<dependency>
-				<groupId>javax.xml.bind</groupId>
-				<artifactId>jaxb-api</artifactId>
-				<version>2.3.1</version>
-			</dependency>
-			<dependency>
-				<groupId>com.sun.xml.bind</groupId>
-				<artifactId>jaxb-core</artifactId>
-				<version>2.3.0.1</version>
-			</dependency>
-			<dependency>
-				<groupId>com.sun.xml.bind</groupId>
-				<artifactId>jaxb-impl</artifactId>
-				<version>2.3.2</version>
-			</dependency>
-			<dependency>
-				<groupId>com.sun.xml.bind</groupId>
-				<artifactId>jaxb1-impl</artifactId>
-				<version>2.2.5.1</version>
-			</dependency>
+            <dependency>
+                <groupId>javax.xml.bind</groupId>
+                <artifactId>jaxb-api</artifactId>
+                <version>2.3.1</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.xml.bind</groupId>
+                <artifactId>jaxb-core</artifactId>
+                <version>2.3.0.1</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.xml.bind</groupId>
+                <artifactId>jaxb-impl</artifactId>
+                <version>2.3.2</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.xml.bind</groupId>
+                <artifactId>jaxb1-impl</artifactId>
+                <version>2.2.5.1</version>
+            </dependency>
 		    <dependency>
 		        <groupId>com.google.code.findbugs</groupId>
 		        <artifactId>jsr305</artifactId>
@@ -792,13 +791,23 @@
 		    <dependency>
 			    <groupId>org.apache.commons</groupId>
 			    <artifactId>commons-lang3</artifactId>
-			    <version>3.11</version>
+			    <version>3.20.0</version>
 			</dependency>
 			<dependency>
 			   <groupId>commons-io</groupId>
 			   <artifactId>commons-io</artifactId>
-			   <version>2.7</version>
+			   <version>2.16.1</version>
 			 </dependency>
+            <dependency>
+                <groupId>commons-fileupload</groupId>
+                <artifactId>commons-fileupload</artifactId>
+                <version>1.6.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-text</artifactId>
+                <version>1.15.0</version>
+            </dependency>
 			 <dependency>
                <groupId>org.json</groupId>
                <artifactId>json</artifactId>
@@ -812,9 +821,74 @@
 			</dependency>
 			<dependency>
 		      <groupId>org.codehaus.groovy</groupId>
-		      <artifactId>groovy-jsr223</artifactId>
-		      <version>3.0.19</version>
+		      <artifactId>groovy-all</artifactId>
+		      <version>2.4.21</version>
 		    </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-servlet</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty</groupId>
+                <artifactId>jetty-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jetty.websocket</groupId>
+                <artifactId>websocket-jetty-server</artifactId>
+                <version>${jetty.version}</version>
+            </dependency>
+
+            <!-- Grizzly Dependencies -->
+            <dependency>
+                <groupId>org.glassfish.grizzly</groupId>
+                <artifactId>grizzly-framework</artifactId>
+                <version>${grizzly-framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.grizzly</groupId>
+                <artifactId>grizzly-http-server</artifactId>
+                <version>${grizzly-framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.grizzly</groupId>
+                <artifactId>grizzly-http-servlet</artifactId>
+                <version>${grizzly-framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.grizzly</groupId>
+                <artifactId>grizzly-websockets</artifactId>
+                <version>${grizzly-framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.cassandra</groupId>
+                <artifactId>java-driver-core</artifactId>
+                <version>${cassandra.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.cassandra</groupId>
+                <artifactId>java-driver-query-builder</artifactId>
+                <version>${cassandra.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.cassandra</groupId>
+                <artifactId>cassandra-all</artifactId>
+                <version>${cassandra-all.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.lz4</groupId>
+                        <artifactId>lz4-java</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>4.2.18.Final</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 		</dependencies>
 	</dependencyManagement>
     <build><finalName>${project.groupId}.${project.artifactId}</finalName>
@@ -833,7 +907,7 @@
                 <plugin>
                     <groupId>org.codehaus.cargo</groupId>
                     <artifactId>cargo-maven3-plugin</artifactId>
-                    <version>1.9.8</version>
+                    <version>1.10.20</version>
                 </plugin>
                 <plugin>
                     <groupId>org.openidentityplatform.commons</groupId>
@@ -863,7 +937,7 @@
                 <plugin>
                     <groupId>org.apache.felix</groupId>
                     <artifactId>maven-bundle-plugin</artifactId>
-                    <version>2.3.7</version>
+                    <version>5.1.9</version>
                     <configuration>
                         <instructions>
                             <Implementation-Build>${ci.build.number}</Implementation-Build>
@@ -904,8 +978,6 @@
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>${mavenCompilerPluginVersion}</version>
                     <configuration>
-                        <source>${maven.compiler.source}</source>
-                        <target>${maven.compiler.target}</target>
                         <encoding>${project.build.sourceEncoding}</encoding>
                         <compilerArgument>-Xlint:all</compilerArgument>
                         <showWarnings>true</showWarnings>
@@ -977,14 +1049,35 @@
 <!--                         </dependency> -->
 <!--                     </dependencies> -->
                     <configuration>
-                    	<source>8</source>
+                    	<source>1.8</source>
+                        <!-- Legacy Maven plugin-descriptor javadoc tags (savage7/i18n/xcite mojos)
+                             are read by maven-plugin-plugin; declare them so doclint accepts them. -->
+                        <tags>
+                            <tag><name>goal</name><placement>a</placement><head>Goal:</head></tag>
+                            <tag><name>phase</name><placement>a</placement><head>Phase:</head></tag>
+                            <tag><name>parameter</name><placement>a</placement><head>Parameter:</head></tag>
+                            <tag><name>component</name><placement>a</placement><head>Component:</head></tag>
+                            <tag><name>required</name><placement>a</placement><head>Required:</head></tag>
+                            <tag><name>readonly</name><placement>a</placement><head>Read-only:</head></tag>
+                            <tag><name>threadSafe</name><placement>a</placement><head>Thread-safe:</head></tag>
+                        </tags>
+                        <!-- Suppress the doclint "missing" group (no comment, no main
+                             description, missing @param/@return/@throws, default constructor)
+                             across the reactor. These are non-fatal documentation-completeness
+                             warnings surfaced as CI annotations; keep the accessibility, html,
+                             reference and syntax checks that guard against real javadoc errors. -->
+                        <doclint>all,-missing</doclint>
+                        <!-- Treat any remaining javadoc warning (html, syntax, reference,
+                             accessibility) as a build error so regressions cannot slip in. -->
+                        <failOnWarnings>true</failOnWarnings>
                         <author>false</author>
                         <quiet>true</quiet>
                         <windowtitle>${javadocWindowTitle}</windowtitle>
                         <doctitle>${javadocDocTitle}</doctitle>
                         <header><![CDATA[<b>${javadocDocTitle}</b>]]></header>
-                        <footer><![CDATA[<b>${javadocDocTitle}</b>]]></footer>
-                        <additionalparam>-linksource</additionalparam>
+                        <!-- No <footer>: the underlying -footer javadoc option was removed
+                             in modern JDKs and only emits a deprecation warning. The header
+                             already carries the same title. -->
                         <show>protected</show>
 <!--                         <excludePackageNames>com.*</excludePackageNames> -->
                         <stylesheetfile>${javadocStylesheet}</stylesheetfile>
@@ -1034,7 +1127,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-shade-plugin</artifactId>
-                    <version>2.0</version>
+                    <version>3.6.0</version>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
@@ -1281,6 +1374,11 @@
                         </licenseMerges>
                     </configuration>
                 </plugin>
+                <plugin>
+                    <groupId>org.openidentityplatform.commons</groupId>
+                    <artifactId>doc-maven-plugin</artifactId>
+                    <version>${project.version}</version>
+                </plugin>
             </plugins>
         </pluginManagement>
         <plugins>
@@ -1308,31 +1406,18 @@
 			      </goals>
 			    </execution>
 			  </executions>
-			  <configuration>
-			  	<doclint>none</doclint>
-			  </configuration>
 			</plugin>
-			<plugin>
-		      <groupId>org.sonatype.plugins</groupId>
-		      <artifactId>nexus-staging-maven-plugin</artifactId>
-		      <version>1.6.12</version>
-		      <extensions>true</extensions>
-		      <configuration>
-		        <serverId>ossrh</serverId>
-		        <nexusUrl>https://oss.sonatype.org/</nexusUrl>
-		        <autoReleaseAfterClose>false</autoReleaseAfterClose>
-		        <stagingProgressTimeoutMinutes>15</stagingProgressTimeoutMinutes>
-		        <keepStagingRepositoryOnFailure>false</keepStagingRepositoryOnFailure>
-		        <keepStagingRepositoryOnCloseRuleFailure>false</keepStagingRepositoryOnCloseRuleFailure>
-		      </configuration>
-		      <dependencies>
-		      	<dependency>
-			        <groupId>com.google.guava</groupId>
-			        <artifactId>guava</artifactId>
-			        <version>15.0</version>
-			     </dependency>
-		      </dependencies>
-		    </plugin>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.11.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>ossrh</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                    <waitMaxTime>5400</waitMaxTime>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
     <profiles>
@@ -1372,6 +1457,15 @@
 	            </plugins>
 	        </build>
 	    </profile>
+        <profile>
+            <id>set-compiler-release</id>
+            <activation>
+                <jdk>[9,)</jdk>
+            </activation>
+            <properties>
+                <maven.compiler.release>11</maven.compiler.release>
+            </properties>
+        </profile>
 	    <profile>
 	      <id>jdk16.options</id>
 	      <activation>

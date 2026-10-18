@@ -1,11 +1,26 @@
 <?xml version="1.0"?>
+<!--
+  The contents of this file are subject to the terms of the Common Development and
+  Distribution License (the License). You may not use this file except in compliance with the
+  License.
+
+  You can obtain a copy of the License at legal/CDDLv1.0.txt. See the License for the
+  specific language governing permission and limitations under the License.
+
+  When distributing Covered Software, include this CDDL Header Notice in each file and include
+  the License file at legal/CDDLv1.0.txt. If applicable, add the following below the CDDL
+  Header, with the fields enclosed by brackets [] replaced by your own identifying
+  information: "Portions copyright [year] [name of copyright owner]".
+
+  Copyright 2020-2026 3A Systems, LLC.
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>org.openidentityplatform.commons</groupId>
     <artifactId>persistit</artifactId>
-    <version>2.1.2-SNAPSHOT</version>
+    <version>3.2.2-SNAPSHOT</version>
   </parent>
   <groupId>org.openidentityplatform.commons.persistit</groupId>
   <artifactId>core</artifactId>
@@ -69,8 +84,13 @@
         	 <dependency>
 			    <groupId>org.glassfish.corba</groupId>
 			    <artifactId>rmic</artifactId>
-			    <version>4.2.0-b004</version>
+			    <version>4.2.0-b007</version>
 			</dependency>
+            <dependency>
+              <groupId>org.ow2.asm</groupId>
+              <artifactId>asm</artifactId>
+              <version>7.3.1</version>
+            </dependency>
         </dependencies>
       </plugin>
      
@@ -79,18 +99,6 @@
         <groupId>com.mycila</groupId>
         <artifactId>license-maven-plugin</artifactId>
         <version>2.6</version>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>animal-sniffer-maven-plugin</artifactId>
-        <version>1.16</version>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-          <skipTests>true</skipTests>
-        </configuration>
       </plugin>
     </plugins>
   </build>

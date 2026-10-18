@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2011-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.json.schema.validator.validators;
@@ -31,7 +32,7 @@ import static org.forgerock.json.schema.validator.Constants.*;
 
 /**
  * IntegerTypeValidator applies all the constraints of a <code>integer</code> type.
- * <p/>
+ * <p>
  * Sample JSON Schema:
  * <code>
  * {
@@ -129,6 +130,7 @@ public class IntegerTypeValidator extends Validator {
     /**
      * {@inheritDoc}
      */
+    @Override
     public void validate(Object node, JsonPointer at, ErrorHandler handler) throws SchemaException {
         if (node instanceof Number) {
             Number number = (Long) node;

@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2012-2015 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC.
  */
 
 package org.forgerock.doc.maven.post;
@@ -112,10 +113,12 @@ public class Bootstrap {
         try {
             HashMap<String, String> replacements = new HashMap<String, String>();
 
-            String gascript = IOUtils.toString(
-                    getClass().getResourceAsStream("/endhead-ga.txt"), "UTF-8");
-            gascript = gascript.replace("ANALYTICS-ID", m.getGoogleAnalyticsId());
-            replacements.put("</head>", gascript);
+            if(m.getGoogleAnalyticsId() != null) {
+                String gascript = IOUtils.toString(
+                        Bootstrap.class.getResourceAsStream("/endhead-ga.txt"), "UTF-8");
+                gascript = gascript.replace("ANALYTICS-ID", m.getGoogleAnalyticsId());
+                replacements.put("</head>", gascript);
+            }
 
             HtmlUtils.updateHtml(htmlDir, replacements);
         } catch (IOException e) {
@@ -131,7 +134,7 @@ public class Bootstrap {
         try {
             HashMap<String, String> replacements = new HashMap<String, String>();
             String draftAlert = IOUtils.toString(
-                    getClass().getResourceAsStream("/endbody-draftalert.txt"), "UTF-8");
+                    Bootstrap.class.getResourceAsStream("/endbody-draftalert.txt"), "UTF-8");
             replacements.put("</body>", draftAlert);
             HtmlUtils.updateHtml(htmlDir, replacements);
         } catch (IOException e) {
@@ -175,9 +178,8 @@ public class Bootstrap {
             + "<li><a href=\"PDF-URL\" target=\"_blank\">"
             + "<span class=\"glyphicon glyphicon-save\"></span> "
             + "Download PDF Version</a></li>";
-
-        String pdfUrl = "../../" + NameUtils.renameDoc(m.getProjectName(),
-                docName, "pdf");
+        String pdfUrl = String.format("https://github.com/OpenIdentityPlatform/%s/wiki/docbkx/pdf/%s",
+                m.getProjectName(), NameUtils.renameDoc(m.getProjectName(), docName, "pdf"));
         link = link.replaceFirst("PDF-URL", pdfUrl);
 
         return link;

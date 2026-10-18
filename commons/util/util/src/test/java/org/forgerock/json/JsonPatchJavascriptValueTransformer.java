@@ -12,31 +12,34 @@
  * information: "Portions Copyrighted [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyrighted 2020-2026 3A Systems LLC.
  */
 
 package org.forgerock.json;
+
+import org.mozilla.javascript.engine.RhinoScriptEngineFactory;
 
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 
 /**
  * RFC6902 expects the patch value to be a predetermined, static value to be used in the
- * patch operation's execution.  This class provides an alternate approach using javascript
+ * patch operation's execution.  This class provides an alternate approach using JavaScript
  * to potentially transform a value (or the entire document itself).
  */
 public class JsonPatchJavascriptValueTransformer implements JsonPatchValueTransformer {
     /**
      * Path to the "script" attribute of a patch entry. This attribute may be used in
-     * place of the "value" attribute to provide a javascript value transform. If both
+     * place of the "value" attribute to provide a JavaScript value transform. If both
      * "script" and "value" are present then "value" takes precedence.
      */
     private static final JsonPointer SCRIPT_PTR = new JsonPointer("/script");
 
     /**
-     * Return the value to be used for a given patch operation, transformed via javascript
+     * Return the value to be used for a given patch operation, transformed via JavaScript
      * if applicable.
      *
-     * The target document is made available to javascript through a variable named
+     * The target document is made available to JavaScript through a variable named
      * 'content'.
      *
      * @param target the patch target document.  Target is unused by default, made available
@@ -73,7 +76,7 @@ public class JsonPatchJavascriptValueTransformer implements JsonPatchValueTransf
         if (Double.parseDouble(System.getProperty("java.specification.version")) < 15) {
             return new ScriptEngineManager(null).getEngineByName("js");
         } else {
-        	return new ScriptEngineManager().getEngineByName("js");
+        	return new RhinoScriptEngineFactory().getScriptEngine();
         }
     }
 }

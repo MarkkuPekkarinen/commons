@@ -12,6 +12,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit.util;
@@ -94,6 +95,18 @@ public interface SequencerConstants {
             array(DEALLOCATE_CHAIN_A, DEALLOCATE_CHAIN_C) };
 
     /*
+     * Used in testing the deferred key-pointer insertion that is left pending
+     * when Exchange#storeInternal releases the tree claim on a RetryException
+     * after a split has already committed, bug 1017957 residual
+     */
+    int STORE_PENDING_SPLIT_A = allocate("STORE_PENDING_SPLIT_A");
+    int STORE_PENDING_SPLIT_B = allocate("STORE_PENDING_SPLIT_B");
+    int STORE_PENDING_SPLIT_C = allocate("STORE_PENDING_SPLIT_C");
+    int[][] STORE_PENDING_SPLIT_SCHEDULE = new int[][] { array(STORE_PENDING_SPLIT_A, STORE_PENDING_SPLIT_B),
+            array(STORE_PENDING_SPLIT_B), array(STORE_PENDING_SPLIT_A, STORE_PENDING_SPLIT_C),
+            array(STORE_PENDING_SPLIT_A, STORE_PENDING_SPLIT_C) };
+
+    /*
      * Used in testing delete/deallocate sequence in Bug1064565Test
      */
     int ACCUMULATOR_CHECKPOINT_A = allocate("ACCUMULATOR_CHECKPOINT_A");
@@ -102,5 +115,27 @@ public interface SequencerConstants {
     int[][] ACCUMULATOR_CHECKPOINT_SCHEDULED = new int[][] { array(ACCUMULATOR_CHECKPOINT_A, ACCUMULATOR_CHECKPOINT_B),
             array(ACCUMULATOR_CHECKPOINT_B), array(ACCUMULATOR_CHECKPOINT_A, ACCUMULATOR_CHECKPOINT_C),
             array(ACCUMULATOR_CHECKPOINT_A, ACCUMULATOR_CHECKPOINT_C) };
+
+    /*
+     * Used in testing a public checkpoint() racing with close() in
+     * CheckpointCloseRaceTest
+     */
+    int CHECKPOINT_CLOSE_A = allocate("CHECKPOINT_CLOSE_A");
+    int CHECKPOINT_CLOSE_B = allocate("CHECKPOINT_CLOSE_B");
+    int CHECKPOINT_CLOSE_C = allocate("CHECKPOINT_CLOSE_C");
+    int[][] CHECKPOINT_CLOSE_SCHEDULE = new int[][] { array(CHECKPOINT_CLOSE_A, CHECKPOINT_CLOSE_B),
+            array(CHECKPOINT_CLOSE_B), array(CHECKPOINT_CLOSE_A, CHECKPOINT_CLOSE_C),
+            array(CHECKPOINT_CLOSE_A, CHECKPOINT_CLOSE_C) };
+
+    /*
+     * Used in testing copyBackPages() racing with close() in
+     * CheckpointCloseRaceTest
+     */
+    int COPYBACK_CLOSE_A = allocate("COPYBACK_CLOSE_A");
+    int COPYBACK_CLOSE_B = allocate("COPYBACK_CLOSE_B");
+    int COPYBACK_CLOSE_C = allocate("COPYBACK_CLOSE_C");
+    int[][] COPYBACK_CLOSE_SCHEDULE = new int[][] { array(COPYBACK_CLOSE_A, COPYBACK_CLOSE_B),
+            array(COPYBACK_CLOSE_B), array(COPYBACK_CLOSE_A, COPYBACK_CLOSE_C),
+            array(COPYBACK_CLOSE_A, COPYBACK_CLOSE_C) };
 
 }

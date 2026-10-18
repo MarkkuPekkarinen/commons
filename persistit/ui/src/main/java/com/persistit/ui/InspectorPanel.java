@@ -1,5 +1,6 @@
 /**
  * Copyright 2005-2012 Akiban Technologies, Inc.
+ * Portions Copyrighted 2026 3A Systems, LLC.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,6 +13,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit.ui;
@@ -81,13 +83,9 @@ class InspectorPanel extends JPanel {
             final StringTokenizer st = new StringTokenizer(paneSpecification, ":");
             final String className = st.nextToken();
             final String caption = st.nextToken();
-            String iconName = null;
-            if (st.hasMoreTokens()) {
-                iconName = st.nextToken();
-            }
             try {
                 final Class cl = Class.forName(className);
-                final AbstractInspector panel = (AbstractInspector) cl.newInstance();
+                final AbstractInspector panel = (AbstractInspector) cl.getDeclaredConstructor().newInstance();
                 panel.setup(_adminUI, this);
                 _tabbedPane.addTab(caption, panel);
             } catch (final Exception e) {
@@ -136,7 +134,7 @@ class InspectorPanel extends JPanel {
         }
 
         if (_showValue) {
-            new Thread(new Fetcher(getLogicalRecord())).start();
+            new Thread(new Fetcher(lr)).start();
         } else {
             refreshed();
         }
@@ -155,9 +153,14 @@ class InspectorPanel extends JPanel {
             final Management management = _adminUI.getManagement();
             if (management == null)
                 return;
+            // Defensive: refresh() already returns early on a null record, but
+            // keep this guard so the dereference below is provably safe.
+            final Management.LogicalRecord logicalRecord = _logicalRecord;
+            if (logicalRecord == null)
+                return;
             try {
                 final Management.LogicalRecord[] results = management.getLogicalRecordArray(getVolumeName(),
-                        getTreeName(), null, _logicalRecord.getKeyState(), Key.EQ, 1, Integer.MAX_VALUE, true
+                        getTreeName(), null, logicalRecord.getKeyState(), Key.EQ, 1, Integer.MAX_VALUE, true
 
                 );
                 if (results == null || results.length == 0) {

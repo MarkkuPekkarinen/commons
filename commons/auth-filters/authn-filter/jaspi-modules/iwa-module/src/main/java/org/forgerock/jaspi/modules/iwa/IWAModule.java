@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2013-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.jaspi.modules.iwa;
@@ -85,7 +86,6 @@ public class IWAModule implements AsyncServerAuthModule {
      * @param clientSubject {@inheritDoc}
      * @param serviceSubject {@inheritDoc}
      * @return {@inheritDoc}
-     * @throws AuthException {@inheritDoc}
      */
     @Override
     public Promise<AuthStatus, AuthenticationException> validateRequest(MessageInfoContext messageInfo,
@@ -99,7 +99,7 @@ public class IWAModule implements AsyncServerAuthModule {
         String httpAuthorization = request.getHeaders().getFirst("Authorization");
 
         try {
-            if (httpAuthorization == null || "".equals(httpAuthorization)) {
+            if (httpAuthorization == null || httpAuthorization.isEmpty()) {
                 LOG.debug("IWAModule: Authorization Header NOT set in request.");
 
                 response.getHeaders().put("WWW-Authenticate", "Negotiate");
@@ -117,6 +117,7 @@ public class IWAModule implements AsyncServerAuthModule {
                     LOG.debug("IWAModule: IWA successful with username, {}", username);
 
                     clientSubject.getPrincipals().add(new Principal() {
+                        @Override
                         public String getName() {
                             return username;
                         }

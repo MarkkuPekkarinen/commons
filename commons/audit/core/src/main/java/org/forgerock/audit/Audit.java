@@ -13,6 +13,7 @@
  *
  * Copyright 2013 Cybernetica AS
  * Portions copyright 2014-2015 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 package org.forgerock.audit;
 
@@ -21,13 +22,13 @@ import static java.lang.annotation.ElementType.METHOD;
 import static java.lang.annotation.ElementType.PARAMETER;
 import static java.lang.annotation.RetentionPolicy.RUNTIME;
 
-import javax.inject.Qualifier;
+import jakarta.inject.Qualifier;
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 
 /**
  * Denotes audit dependencies.
- * <p/>
+ * <p>
  * This annotation can be added to injected parameters to help dependency injection frameworks identify the instance
  * of the parameter type that should be injected.
  */

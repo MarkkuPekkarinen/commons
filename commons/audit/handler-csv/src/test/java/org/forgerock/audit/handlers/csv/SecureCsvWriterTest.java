@@ -12,26 +12,34 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 package org.forgerock.audit.handlers.csv;
 
 import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assertions.contentOf;
 import static org.forgerock.audit.handlers.csv.CsvSecureConstants.*;
 import static org.forgerock.util.time.Duration.duration;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PublicKey;
-import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 import javax.crypto.SecretKey;
@@ -43,6 +51,8 @@ import org.forgerock.audit.secure.JcaKeyStoreHandler;
 import org.forgerock.audit.secure.KeyStoreHandlerDecorator;
 import org.forgerock.audit.secure.KeyStoreSecureStorage;
 import org.forgerock.audit.secure.SecureStorage;
+import org.forgerock.audit.secure.SecureStorageException;
+import org.forgerock.audit.util.GzipUtil;
 import org.forgerock.util.encode.Base64;
 import org.forgerock.util.time.Duration;
 import org.slf4j.Logger;
@@ -50,6 +60,7 @@ import org.slf4j.LoggerFactory;
 import org.supercsv.prefs.CsvPreference;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 @SuppressWarnings("javadoc")
@@ -149,9 +160,11 @@ public class SecureCsvWriterTest {
         final File actual = new File("target/test-classes/shouldGenerateHMACColumn-actual.txt");
         actual.delete();
         final String header = "FOO";
+        // Use a signature interval long enough to never fire during the test, so that the final
+        // signature is deterministically written by close() and the file content is predictable.
         try (SecureCsvWriter secureCsvWriter = new SecureCsvWriter(
-                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE, createBasicSecureConfig(),
-                keyStoreHandler, random)) {
+                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE,
+                createBasicSecureConfig("5 minutes"), keyStoreHandler, random)) {
             Map<String, String> values;
 
 //            secureCsvWriter.writeHeader(header);
@@ -182,8 +195,8 @@ public class SecureCsvWriterTest {
         actual.delete();
         final String header = "FOO";
         try (SecureCsvWriter secureCsvWriter = new SecureCsvWriter(
-                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE, createBasicSecureConfig(),
-                keyStoreHandler, random)) {
+                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE,
+                createBasicSecureConfig(signatureInterval.toString()), keyStoreHandler, random)) {
 
             secureCsvWriter.writeEvent(singletonMap(header, "bar"));
 
@@ -211,15 +224,140 @@ public class SecureCsvWriterTest {
                 new File("target/test-classes/shouldGeneratePeriodicallySignature-expected.txt")));
     }
 
-    private CsvAuditEventHandlerConfiguration createBasicSecureConfig() {
+    @Test
+    public void shouldStopSchedulerAndCloseFileWhenFinalSignatureFails() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("SecureCsvWriterTest");
+        final File actual = new File(logDirectory.toFile(), "tamper-evident-test.csv");
+        final String header = "FOO";
+        // The scheduler of the writer creates its thread in the group of the thread that creates the writer.
+        final ThreadGroup writerThreads = new ThreadGroup("SecureCsvWriterTest");
+        // A signature interval long enough to leave the final signature to close().
+        final FutureTask<SecureCsvWriter> creation = new FutureTask<>(() -> new SecureCsvWriter(
+                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE,
+                createBasicSecureConfig("5 minutes"), keyStoreHandler, random));
+        final Thread creator = new Thread(writerThreads, creation);
+        creator.start();
+        final SecureCsvWriter secureCsvWriter = creation.get();
+        creator.join();
+        secureCsvWriter.writeEvent(singletonMap(header, "one"));
+        assertThat(writerThreads.activeCount()).as("scheduler threads").isPositive();
+
+        // A keystore cannot be stored over a directory, so the final signature fails.
+        final File keyStoreFile = new File(actual.getPath() + ".keystore");
+        assertThat(keyStoreFile.delete()).isTrue();
+        assertThat(keyStoreFile.mkdir()).isTrue();
+        assertThatThrownBy(secureCsvWriter::close)
+                .isInstanceOf(IOException.class)
+                .hasCauseInstanceOf(SecureStorageException.class);
+
+        // The scheduler thread is not a daemon thread, it would keep the JVM from exiting.
+        assertThreadsTerminate(writerThreads);
+
+        // The file is closed: an event written after close() does not reach it, whether the write fails or not.
+        final long length = actual.length();
+        catchThrowable(() -> secureCsvWriter.writeEvent(singletonMap(header, "two")));
+        assertThat(actual.length()).isEqualTo(length);
+    }
+
+    /** Fails if a thread of the group is still alive after 5 s. */
+    static void assertThreadsTerminate(ThreadGroup group) throws InterruptedException {
+        final Thread[] threads = new Thread[group.activeCount() + 1];
+        final int count = group.enumerate(threads);
+        for (int i = 0; i < count; i++) {
+            threads[i].join(5000);
+            assertThat(threads[i].isAlive()).as(threads[i].getName() + " alive").isFalse();
+        }
+    }
+
+    @Test(timeOut = 60_000)
+    public void shouldForceRotationWhileAnotherThreadWritesAnEvent() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("SecureCsvWriterTest");
+        final File actual =
+                new File(logDirectory.toFile(), CsvAuditEventHandler.SECURE_CSV_FILENAME_PREFIX + "access.csv");
+        final String header = "FOO";
+        CsvAuditEventHandlerConfiguration config = new CsvAuditEventHandlerConfiguration();
+        config.getSecurity().setEnabled(true);
+        config.getSecurity().setSignatureInterval("5 minutes");
+        config.getFileRotation().setRotationEnabled(true);
+        config.getFileRotation().setRotationFileSuffix("-yyyy.MM.dd-HH.mm.ss.SSS");
+        config.setRotationRetentionCheckInterval("5 minutes");
+        final SecureCsvWriter secureCsvWriter = new SecureCsvWriter(
+                actual, new String[]{header}, CsvPreference.EXCEL_PREFERENCE, config, keyStoreHandler, random);
+        // a pending signature, which the rotation writes first
+        secureCsvWriter.writeEvent(singletonMap(header, "one"));
+
+        final FutureTask<Boolean> rotation = new FutureTask<>(secureCsvWriter::forceRotation);
+        final Thread rotator = new Thread(rotation, "rotator");
+        rotator.setDaemon(true);
+        final FutureTask<Void> publication = new FutureTask<>(() -> {
+            // hold the signature lock, and only it, as writeEvent() holds it while it writes to the rotatable writer
+            secureCsvWriter.beforeRollingOver();
+            try {
+                rotator.start();
+                awaitWaitingForLockOf(rotator, Thread.currentThread());
+                secureCsvWriter.writeEvent(singletonMap(header, "two"));
+            } finally {
+                secureCsvWriter.afterRollingOver();
+            }
+            return null;
+        });
+        final Thread publisher = new Thread(publication, "publisher");
+        publisher.setDaemon(true);
+        publisher.start();
+
+        publication.get(10, TimeUnit.SECONDS);
+        assertThat(rotation.get(10, TimeUnit.SECONDS)).isTrue();
+        secureCsvWriter.close();
+
+        // both events are in the archive, before the signature that the rotation writes
+        final SecretKey keystorePasswordKey = keyStoreHandler.readSecretKeyFromKeyStore(ENTRY_PASSWORD);
+        final String keystorePassword = Base64.encode(keystorePasswordKey.getEncoded());
+        final PublicKey publicKey = keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE);
+        final FileNamingPolicy fileNamingPolicy =
+                new TimeStampFileNamingPolicy(actual, "-yyyy.MM.dd-HH.mm.ss.SSS", "");
+        final List<VerificationResult> verificationResults = new CsvSecureArchiveVerifier(
+                fileNamingPolicy, keystorePassword, publicKey, CsvPreference.EXCEL_PREFERENCE).verify();
+        assertThat(verificationResults).hasSize(1);
+        final VerificationResult archive = verificationResults.get(0);
+        assertThat(archive.hasPassedVerification()).as(archive.getFailureReason()).isTrue();
+        assertThat(contentOf(archive.getArchiveFile())).containsPattern("(?m)^one,").containsPattern("(?m)^two,");
+    }
+
+    /** Waits until the thread waits for a lock that the owner holds. */
+    private static void awaitWaitingForLockOf(final Thread thread, final Thread owner) throws InterruptedException {
+        final ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!isWaitingForLockOf(threads, thread, owner) && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(isWaitingForLockOf(threads, thread, owner))
+                .as(thread.getName() + " waits for a lock of " + owner.getName())
+                .isTrue();
+    }
+
+    private static boolean isWaitingForLockOf(final ThreadMXBean threads, final Thread thread, final Thread owner) {
+        final ThreadInfo threadInfo = threads.getThreadInfo(thread.getId());
+        return threadInfo != null && threadInfo.getLockOwnerId() == owner.getId();
+    }
+
+    private CsvAuditEventHandlerConfiguration createBasicSecureConfig(String interval) {
         CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
         configuration.getSecurity().setEnabled(true);
-        configuration.getSecurity().setSignatureInterval(signatureInterval.toString());
+        configuration.getSecurity().setSignatureInterval(interval);
         return configuration;
     }
 
-    @Test
-    public void shouldRotateCsvAndKeyStoreFile() throws Exception {
+    @DataProvider
+    private Object[][] rotationFileSuffixes() {
+        return new Object[][] {
+            { "-yyyy.MM.dd-HH.mm.ss.SSS" },
+            // the archives are gzip-compressed
+            { "-yyyy.MM.dd-HH.mm.ss.SSS.gz" }
+        };
+    }
+
+    @Test(dataProvider = "rotationFileSuffixes")
+    public void shouldRotateCsvAndKeyStoreFile(final String rotationFileSuffix) throws Exception {
         final Path logDirectory = Files.createTempDirectory("SecureCsvWriterTest");
         final String filename = CsvAuditEventHandler.SECURE_CSV_FILENAME_PREFIX + "shouldRotateCsvAndKeyStoreFile.csv";
         final File actual = new File(logDirectory.toFile(), filename);
@@ -228,7 +366,7 @@ public class SecureCsvWriterTest {
         config.getSecurity().setEnabled(true);
         config.getSecurity().setSignatureInterval("5 minutes"); // ensure no periodically added signatures during test
         config.getFileRotation().setRotationEnabled(true);
-        config.getFileRotation().setRotationFileSuffix("-yyyy.MM.dd-HH.mm.ss.SSS");
+        config.getFileRotation().setRotationFileSuffix(rotationFileSuffix);
         config.getFileRotation().setMaxFileSize(20);
         config.setRotationRetentionCheckInterval("5 minutes");
         try (SecureCsvWriter secureCsvWriter = new SecureCsvWriter(
@@ -245,20 +383,22 @@ public class SecureCsvWriterTest {
         final String keystorePassword = Base64.encode(keystorePasswordKey.getEncoded());
         final PublicKey publicKey = keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE);
         final FileNamingPolicy fileNamingPolicy =
-                new TimeStampFileNamingPolicyWithNamedBasedOrdering(actual, "-yyyy.MM.dd-HH.mm.ss.SSS", "");
+                new TimeStampFileNamingPolicyWithNamedBasedOrdering(actual, rotationFileSuffix, "");
         final CsvSecureArchiveVerifier archiveVerifier = new CsvSecureArchiveVerifier(
                 fileNamingPolicy, keystorePassword, publicKey, CsvPreference.EXCEL_PREFERENCE);
 
         // Verify the expected files were created
         assertThat(actual).exists();
-        assertThat(fileNamingPolicy.listFiles()).isNotEmpty().hasSize(6);
+        assertThat(fileNamingPolicy.listFiles()).isNotEmpty().hasSize(6)
+                .allMatch(file -> file.getName().endsWith(".gz") == rotationFileSuffix.endsWith(".gz"),
+                        "compressed if the suffix ends with .gz");
 
         // Verify the contents of the files
         List<VerificationResult> verificationResults = archiveVerifier.verify();
         VerificationResult finalVerificationResult = verificationResults.remove(5);
         for (final VerificationResult verificationResult : verificationResults) {
             assertThat(verificationResult.hasPassedVerification())
-                    .as("File " + verificationResult.getArchiveFile())
+                    .as("File " + verificationResult.getArchiveFile() + ": " + verificationResult.getFailureReason())
                     .isTrue();
         }
         // The final file is not verifiable currently as it doesn't contain any audit events (so no HMAC entry).
@@ -280,7 +420,7 @@ public class SecureCsvWriterTest {
             CsvSecureArchiveVerifierCli.OptionsParser.FLAG_ARCHIVE_DIRECTORY, logDirectory.toString(),
             CsvSecureArchiveVerifierCli.OptionsParser.FLAG_TOPIC, "shouldRotateCsvAndKeyStoreFile",
             CsvSecureArchiveVerifierCli.OptionsParser.FLAG_PREFIX, "",
-            CsvSecureArchiveVerifierCli.OptionsParser.FLAG_SUFFIX, "-yyyy.MM.dd-HH.mm.ss.SSS",
+            CsvSecureArchiveVerifierCli.OptionsParser.FLAG_SUFFIX, rotationFileSuffix,
             CsvSecureArchiveVerifierCli.OptionsParser.FLAG_KEYSTORE_FILE, KEYSTORE_FILENAME,
             CsvSecureArchiveVerifierCli.OptionsParser.FLAG_KEYSTORE_PASSWORD, KEYSTORE_PASSWORD
         };
@@ -309,6 +449,37 @@ public class SecureCsvWriterTest {
         assertThat(err.toString()).isEqualTo("");
     }
 
+    @Test
+    public void shouldRotateKeyStoreFileWhenFileNameHasRegexCharacters() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("SecureCsvWriterTest");
+        // '+' is a regex quantifier
+        final File actual =
+                new File(logDirectory.toFile(), CsvAuditEventHandler.SECURE_CSV_FILENAME_PREFIX + "a+b.csv");
+        final String rotationFileSuffix = "-yyyy.MM.dd-HH.mm.ss.SSS";
+        CsvAuditEventHandlerConfiguration config = new CsvAuditEventHandlerConfiguration();
+        config.getSecurity().setEnabled(true);
+        config.getSecurity().setSignatureInterval("5 minutes");
+        config.getFileRotation().setRotationEnabled(true);
+        config.getFileRotation().setRotationFileSuffix(rotationFileSuffix);
+        config.setRotationRetentionCheckInterval("5 minutes");
+        try (SecureCsvWriter secureCsvWriter = new SecureCsvWriter(
+                actual, new String[]{"FOO"}, CsvPreference.EXCEL_PREFERENCE, config, keyStoreHandler, random)) {
+            secureCsvWriter.writeEvent(singletonMap("FOO", "one"));
+            assertThat(secureCsvWriter.forceRotation()).isTrue();
+        }
+
+        final String keystorePassword =
+                Base64.encode(keyStoreHandler.readSecretKeyFromKeyStore(ENTRY_PASSWORD).getEncoded());
+        final PublicKey publicKey = keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE);
+        final List<VerificationResult> verificationResults = new CsvSecureArchiveVerifier(
+                new TimeStampFileNamingPolicy(actual, rotationFileSuffix, null), keystorePassword, publicKey,
+                CsvPreference.EXCEL_PREFERENCE).verify();
+        assertThat(verificationResults).hasSize(1);
+        assertThat(verificationResults.get(0).hasPassedVerification())
+                .as(verificationResults.get(0).getFailureReason())
+                .isTrue();
+    }
+
     static class TimeStampFileNamingPolicyWithNamedBasedOrdering extends TimeStampFileNamingPolicy {
 
         public TimeStampFileNamingPolicyWithNamedBasedOrdering(
@@ -324,7 +495,8 @@ public class SecureCsvWriterTest {
         public List<File> listFiles() {
             List<File> fileList = super.listFiles();
             // make sure the files are sorted from oldest to newest by filename - timestamps won't be accurate enough.
-            Collections.sort(fileList);
+            // Without .gz, so that a collision name (<timestamp>.1.gz) sorts after <timestamp>.gz.
+            fileList.sort(Comparator.comparing(file -> GzipUtil.removeGzipSuffix(file).getName()));
             return fileList;
         }
     }

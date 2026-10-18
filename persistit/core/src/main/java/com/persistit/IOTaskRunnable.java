@@ -1,6 +1,8 @@
 /**
  * Copyright 2011-2012 Akiban Technologies, Inc.
- * 
+ *
+ * Portions Copyrighted 2026 3A Systems, LLC.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,6 +14,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit;
@@ -34,6 +37,8 @@ abstract class IOTaskRunnable implements Runnable {
     private volatile Thread _thread;
 
     private boolean _stopped;
+
+    private volatile boolean _crashed;
 
     private boolean _notified;
 
@@ -60,7 +65,7 @@ abstract class IOTaskRunnable implements Runnable {
     synchronized void kick() {
         if (!_notified) {
             _notified = true;
-            notify();
+            notifyAll();
         }
     }
 
@@ -109,15 +114,22 @@ abstract class IOTaskRunnable implements Runnable {
         }
     }
 
-    @SuppressWarnings("deprecation")
-    // Use only for tests.
+    // Use only for tests. Simulates an abrupt crash of the background thread.
+    //
+    // Thread.stop() was removed from the JDK (it throws NoSuchMethodError on
+    // recent releases), so instead we raise a "crashed" flag and interrupt the
+    // thread. The run() loop observes the flag and returns immediately without
+    // performing its normal clean shutdown, reproducing the abandon-in-place
+    // behavior the recovery tests rely on.
     protected void crash() {
         final Thread thread = _thread;
+        _crashed = true;
+        setStopped();
         for (int count = 0; (thread != null && thread.isAlive()); count++) {
             if (count > 0) {
                 _persistit.getLogBase().crashRetry.log(count, _thread.getName());
             }
-            thread.stop();
+            thread.interrupt();
             try {
                 thread.join(THREAD_DEATH_WAIT_INTERVAL);
             } catch (final InterruptedException e) {
@@ -132,6 +144,14 @@ abstract class IOTaskRunnable implements Runnable {
         while (true) {
             synchronized (this) {
                 _notified = false;
+            }
+            if (_crashed) {
+                /*
+                 * A simulated crash abandons work in place: return without a
+                 * clean shutdown (no flush, no closeSession) to mimic the old
+                 * Thread.stop() behavior relied on by the recovery tests.
+                 */
+                return;
             }
             try {
                 /*
@@ -157,7 +177,7 @@ abstract class IOTaskRunnable implements Runnable {
                     break;
                 }
 
-                while (!shouldStop()) {
+                while (!shouldStop() && !_crashed) {
                     final long pollInterval = pollInterval();
                     if (_notified && pollInterval >= 0) {
                         break;

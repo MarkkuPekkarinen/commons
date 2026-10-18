@@ -13,6 +13,7 @@
  *
  * Copyright 2010?2011 ApexIdentity Inc.
  * Portions Copyright 2011-2016 ForgeRock AS.
+ * Portions copyright 2020-2026 3A Systems LLC.
  */
 package org.forgerock.http.servlet;
 
@@ -34,12 +35,12 @@ import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.ServiceLoader;
 
-import javax.servlet.ServletConfig;
-import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletConfig;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import org.forgerock.http.ApiProducer;
 import org.forgerock.http.DescribedHttpApplication;
@@ -62,6 +63,7 @@ import org.forgerock.services.context.Context;
 import org.forgerock.services.context.RequestAuditContext;
 import org.forgerock.services.context.RootContext;
 import org.forgerock.util.Factory;
+import org.forgerock.util.crypto.SecretHash;
 import org.forgerock.util.promise.NeverThrowsException;
 import org.forgerock.util.promise.Promise;
 import org.forgerock.util.promise.ResultHandler;
@@ -89,7 +91,7 @@ public final class HttpFrameworkServlet extends HttpServlet {
     private static final long serialVersionUID = 3524182656424860912L;
 
     /** Standard specified request attribute name for retrieving X509 Certificates. */
-    private static final String SERVLET_REQUEST_X509_ATTRIBUTE = "javax.servlet.request.X509Certificate";
+    private static final String SERVLET_REQUEST_X509_ATTRIBUTE = "jakarta.servlet.request.X509Certificate";
 
     /** Methods that should not include an entity body. */
     private static final CaseInsensitiveSet NON_ENTITY_METHODS = new CaseInsensitiveSet(
@@ -370,7 +372,11 @@ public final class HttpFrameworkServlet extends HttpServlet {
                     for (String value : response.getHeaders().get(name).getValues()) {
                         if (value != null && value.length() > 0) {
                             servletResponse.addHeader(name, value);
-                            logger.trace("header {}={}",name, value);
+                            // Log the header name in clear and only a one-way hash of the value; values may
+                            // carry secrets such as Set-Cookie / Authorization (CWE-532: sensitive data in logs).
+                            if (logger.isTraceEnabled()) {
+                                logger.trace("header {}={}", name, SecretHash.hash(value));
+                            }
                         }
                     }
                 }

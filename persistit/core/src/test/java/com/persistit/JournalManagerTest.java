@@ -1,6 +1,8 @@
 /**
  * Copyright 2011-2012 Akiban Technologies, Inc.
- * 
+ *
+ * Portions Copyrighted 2026 3A Systems, LLC.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -20,6 +22,7 @@ import com.persistit.Accumulator.SumAccumulator;
 import com.persistit.CheckpointManager.Checkpoint;
 import com.persistit.JournalManager.PageNode;
 import com.persistit.TransactionPlayer.TransactionPlayerListener;
+import com.persistit.exception.PersistitClosedException;
 import com.persistit.exception.PersistitException;
 import com.persistit.unit.ConcurrentUtil.ThrowingRunnable;
 import com.persistit.util.Util;
@@ -477,6 +480,18 @@ public class JournalManagerTest extends PersistitUnitTestCase {
         volume1 = null;
         volume2 = null;
         _persistit = new Persistit(_config);
+        /*
+         * The missing-volume alert is posted by JournalManager.writeForCopy when
+         * the journal copier tries to copy a page back to a now-deleted volume.
+         * For these non-transactional pages that copy runs on the background
+         * JOURNAL_COPIER thread, so asserting immediately after startup races it:
+         * on a slow/loaded runner no alert has been posted yet and getHistory()
+         * returns null (intermittent CI failure). Force the copy-back so the
+         * alert is generated deterministically. ignoreMissingVolumes is still
+         * false here, so the pages are retained for the ignore-behavior check
+         * below.
+         */
+        _persistit.copyBackPages();
         final AlertMonitor am = _persistit.getAlertMonitor();
         assertTrue("Startup with missing volumes should have generated alerts",
                 am.getHistory(AlertMonitor.MISSING_VOLUME_CATEGORY) != null);
@@ -662,6 +677,50 @@ public class JournalManagerTest extends PersistitUnitTestCase {
         addSchedules(PAGE_MAP_READ_INVALIDATE_SCHEDULE);
         startAndJoinAssertSuccess(25000, thread1, thread2);
         disableSequencer();
+    }
+
+    @Test
+    public void waitForDurabilityAfterCloseThrowsPersistitClosedException() throws Exception {
+        final JournalManager jman = _persistit.getJournalManager();
+        final long flushedTimestamp = _persistit.getTimestampAllocator().updateTimestamp();
+        _persistit.close();
+        try {
+            jman.waitForDurability(flushedTimestamp, 0, 0);
+            fail("Expected PersistitClosedException");
+        } catch (final PersistitClosedException expected) {
+            /*
+             * A commit racing Persistit.close() must observe the documented
+             * closed-state exception, not a raw IllegalStateException that
+             * bypasses callers' shutdown handling (issue #304).
+             */
+        }
+    }
+
+    @Test
+    public void waitForDurabilityOnStoppedFlusherThrowsInsteadOfSpinning() throws Exception {
+        final JournalManager jman = _persistit.getJournalManager();
+        _persistit.crash();
+        /*
+         * crash() stops JOURNAL_FLUSHER without clearing the JournalManager's
+         * reference to it, and a timestamp allocated after the flusher's final
+         * cycle can never be covered by its durability marks - the shape of
+         * the shutdown race in which a committing thread captured the flusher
+         * reference just before it was cleared. Without the stopped-flusher
+         * check this wait polls forever.
+         */
+        final long flushedTimestamp = _persistit.getTimestampAllocator().updateTimestamp();
+        final Thread waiter = createThread("WAIT_FOR_DURABILITY", new ThrowingRunnable() {
+            @Override
+            public void run() throws Exception {
+                try {
+                    jman.waitForDurability(flushedTimestamp, 0, 0);
+                    fail("Expected PersistitClosedException");
+                } catch (final PersistitClosedException expected) {
+                    // expected
+                }
+            }
+        });
+        startAndJoinAssertSuccess(10000, waiter);
     }
 
     private int countKeys(final boolean mvcc) throws PersistitException {

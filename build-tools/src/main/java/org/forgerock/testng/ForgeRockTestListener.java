@@ -13,6 +13,7 @@
  *
  *      Copyright 2008 Sun Microsystems, Inc.
  *      Portions copyright 2011-2012 ForgeRock AS
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 package org.forgerock.testng;
 
@@ -302,6 +303,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         initializeProgressVars();
     }
 
+    @Override
     public void generateReport(final List<XmlSuite> xmlSuites, final List<ISuite> suites,
             final String outputDirectory) {
         final File reportFile = new File(outputDirectory, REPORT_FILE_NAME);
@@ -310,6 +312,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         writeAntTestsFailedMarker(outputDirectory);
     }
 
+    @Override
     public void onConfigurationFailure(final ITestResult tr) {
         super.onConfigurationFailure(tr);
 
@@ -331,6 +334,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         _bufferedTestFailures.append(failureInfo);
     }
 
+    @Override
     public void onStart(final ITestContext testContext) {
         super.onStart(testContext);
 
@@ -338,11 +342,13 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         new File(testContext.getOutputDirectory(), REPORT_FILE_NAME).delete();
     }
 
+    @Override
     public void onTestFailedButWithinSuccessPercentage(final ITestResult tr) {
         super.onTestFailedButWithinSuccessPercentage(tr);
         onTestFinished(tr);
     }
 
+    @Override
     public void onTestFailure(final ITestResult tr) {
         super.onTestFailure(tr);
 
@@ -378,11 +384,13 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         onTestFinished(tr);
     }
 
+    @Override
     public void onTestSkipped(final ITestResult tr) {
         super.onTestSkipped(tr);
         onTestFinished(tr);
     }
 
+    @Override
     public void onTestStart(final ITestResult tr) {
         super.onTestStart(tr);
         enforceTestClassTypeAndAnnotations(tr);
@@ -390,6 +398,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         enforceMethodHasAnnotation(tr);
     }
 
+    @Override
     public void onTestSuccess(final ITestResult tr) {
         super.onTestSuccess(tr);
         onTestFinished(tr);
@@ -413,7 +422,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
 
         // Read the comments in ForgeRockTestCase to understand what's
         // going on here.
-        final Object[] testInstances = result.getMethod().getInstances();
+        final Object[] testInstances = new Object[] { result.getMethod().getInstance() };
         for (final Object testInstance : testInstances) {
             if (testInstance instanceof ForgeRockTestCase) {
                 final ForgeRockTestCase testCase = (ForgeRockTestCase) testInstance;
@@ -440,14 +449,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
     }
 
     private void checkForInterleavedBetweenClasses(final ITestResult tr) {
-        final Object[] testInstances = tr.getMethod().getInstances();
-        // This will almost always have a single element. If it doesn't,
-        // just skip it.
-        if (testInstances.length != 1) {
-            return;
-        }
-
-        final Object testInstance = testInstances[0];
+        final Object testInstance = tr.getMethod().getInstance();
 
         // We're running another test on the same test object. Everything is
         // fine.
@@ -584,6 +586,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
         final List<TestClassResults> allClasses = new ArrayList<TestClassResults>(
                 _classResults.values());
         Collections.sort(allClasses, new Comparator<TestClassResults>() {
+            @Override
             public int compare(final TestClassResults o1, final TestClassResults o2) {
                 if (o1._totalDurationMs > o2._totalDurationMs) {
                     return -1;
@@ -607,6 +610,7 @@ public final class ForgeRockTestListener extends TestListenerAdapter implements 
     private List<TestMethodResults> getMethodsDescendingSortedByDuration() {
         final List<TestMethodResults> allMethods = getAllMethodResults();
         Collections.sort(allMethods, new Comparator<TestMethodResults>() {
+            @Override
             public int compare(final TestMethodResults o1, final TestMethodResults o2) {
                 if (o1._totalDurationMs > o2._totalDurationMs) {
                     return -1;

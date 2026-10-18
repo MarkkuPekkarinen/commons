@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 package org.forgerock.audit.handlers.csv;
 
@@ -52,7 +53,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import javax.inject.Inject;
+import jakarta.inject.Inject;
 
 import org.forgerock.audit.Audit;
 import org.forgerock.audit.events.EventTopicsMetaData;
@@ -63,6 +64,7 @@ import org.forgerock.audit.providers.KeyStoreHandlerProvider;
 import org.forgerock.audit.retention.TimeStampFileNamingPolicy;
 import org.forgerock.audit.secure.JcaKeyStoreHandler;
 import org.forgerock.audit.secure.KeyStoreHandler;
+import org.forgerock.audit.util.GzipUtil;
 import org.forgerock.audit.util.JsonValueUtils;
 import org.forgerock.json.JsonPointer;
 import org.forgerock.json.JsonValue;
@@ -166,26 +168,26 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
             }
         }
 
-        Map<String, Set<String>> fieldOrderByTopic = new HashMap<>();
-        Map<String, JsonPointer> jsonPointerByField = new HashMap<>();
-        Map<String, String> fieldDotNotationByField = new HashMap<>();
+        Map<String, Set<String>> orderByTopic = new HashMap<>();
+        Map<String, JsonPointer> pointerByField = new HashMap<>();
+        Map<String, String> dotNotationByField = new HashMap<>();
         for (String topic : this.eventTopicsMetaData.getTopics()) {
             try {
                 Set<String> fieldOrder = getFieldOrder(topic, this.eventTopicsMetaData);
                 for (String field : fieldOrder) {
-                    if (!jsonPointerByField.containsKey(field)) {
-                        jsonPointerByField.put(field, new JsonPointer(field));
-                        fieldDotNotationByField.put(field, jsonPointerToDotNotation(field));
+                    if (!pointerByField.containsKey(field)) {
+                        pointerByField.put(field, new JsonPointer(field));
+                        dotNotationByField.put(field, jsonPointerToDotNotation(field));
                     }
                 }
-                fieldOrderByTopic.put(topic, Collections.unmodifiableSet(fieldOrder));
+                orderByTopic.put(topic, Collections.unmodifiableSet(fieldOrder));
             } catch (ResourceException e) {
                 LOGGER.error(topic + " topic schema meta-data misconfigured.");
             }
         }
-        this.fieldOrderByTopic = Collections.unmodifiableMap(fieldOrderByTopic);
-        this.jsonPointerByField = Collections.unmodifiableMap(jsonPointerByField);
-        this.fieldDotNotationByField = Collections.unmodifiableMap(fieldDotNotationByField);
+        this.fieldOrderByTopic = Collections.unmodifiableMap(orderByTopic);
+        this.jsonPointerByField = Collections.unmodifiableMap(pointerByField);
+        this.fieldDotNotationByField = Collections.unmodifiableMap(dotNotationByField);
     }
 
     private CsvPreference createCsvPreference(final CsvAuditEventHandlerConfiguration config) {
@@ -272,7 +274,7 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
                 newCsvWriter = writers.get(topic);
                 if (newCsvWriter == csvWriter) {
                     // If both references are the same, the writer hasn't been reset.
-                    newCsvWriter = resetAndReopenWriter(topic, false);
+                    newCsvWriter = resetAndReopenWriter(topic);
                     LOGGER.debug("Resetting writer");
                 } else {
                     LOGGER.debug("Writer reset by another thread");
@@ -288,10 +290,10 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
 
     /**
      * Lookup CsvWriter for specified topic.
-     * <br/>
+     * <br>
      * Uses lazy synchronization in case another thread may be resetting the writer. If the writer is still null
      * after synchronizing then the writer is reset.
-     * <br/>
+     * <br>
      * This method is only intended for use by {@link #publishEventWithRetry(String, JsonValue)}.
      */
     private CsvWriter getWriter(String topic) throws BadRequestException {
@@ -302,7 +304,7 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
                 csvWriter = writers.get(topic);
                 if (csvWriter == null) {
                     LOGGER.debug("CSV file writer for {} topic not reset by another thread; resetting", topic);
-                    csvWriter = resetAndReopenWriter(topic, false);
+                    csvWriter = resetAndReopenWriter(topic);
                 }
             }
         }
@@ -434,8 +436,9 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
                 throw new BadRequestException("Error when rotating file for topic: " + topic, e);
             }
         } else {
-            // use a default rotation instead
-            resetAndReopenWriter(topic, true);
+            // use a default rotation instead, and compress outside the handler monitor, which publishers retrying
+            // on the closed writer and shutdown wait for
+            GzipUtil.compressRotatedFile(rotateAndReopenWriter(topic));
         }
         return Responses.newActionResponse(json(object(field("rotated", "true"))));
     }
@@ -457,23 +460,50 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
         csvWriter.writeEvent(cells);
     }
 
-    private synchronized CsvWriter resetAndReopenWriter(final String topic, boolean forceRotation)
-            throws BadRequestException {
+    private synchronized CsvWriter resetAndReopenWriter(final String topic) throws BadRequestException {
         closeWriter(topic);
         try {
-            File auditLogFile = getAuditLogFile(topic);
-            if (forceRotation) {
-                TimeStampFileNamingPolicy namingPolicy = new TimeStampFileNamingPolicy(auditLogFile, null, null);
-                File rotatedFile = namingPolicy.getNextName();
-                if (!auditLogFile.renameTo(rotatedFile)) {
-                    throw new BadRequestException(
-                            format("Unable to rename file %s to %s when rotating", auditLogFile, rotatedFile));
-                }
-            }
-            return openWriter(topic, auditLogFile);
+            return openWriter(topic, getAuditLogFile(topic));
         } catch (IOException e) {
             throw new BadRequestException(e);
         }
+    }
+
+    /**
+     * Renames the audit file of a topic to its next timestamped name, and opens a new audit file. With tamper evident
+     * logging, the keystore of the audit file is renamed after the archive, and the new audit file gets a new one.
+     *
+     * @return The archive name of the rotated file. A file to compress is renamed without the .gz suffix, and the
+     *         caller compresses it with {@link GzipUtil#compressRotatedFile(File)}.
+     */
+    private synchronized File rotateAndReopenWriter(final String topic) throws BadRequestException {
+        closeWriter(topic);
+        final File auditLogFile = getAuditLogFile(topic);
+        final File rotatedFile = new TimeStampFileNamingPolicy(auditLogFile, null, null).getNextName();
+        final File renamedFile = GzipUtil.removeGzipSuffix(rotatedFile);
+        if (!auditLogFile.renameTo(renamedFile)) {
+            throw new BadRequestException(
+                    format("Unable to rename file %s to %s when rotating", auditLogFile, renamedFile));
+        }
+        if (configuration.getSecurity().isEnabled()) {
+            // named after the archive name, as SecureCsvWriter names it when RotatableWriter rotates the file
+            final File keyStoreFile = CsvSecureUtils.keyStoreFile(auditLogFile);
+            final File archivedKeyStoreFile = CsvSecureUtils.keyStoreFile(rotatedFile);
+            if (!keyStoreFile.renameTo(archivedKeyStoreFile)) {
+                LOGGER.error("Unable to rename {} to {} when rotating", keyStoreFile, archivedKeyStoreFile);
+                // a new audit file would overwrite the keys of the archived file in its keystore, so the writer
+                // resumes the audit file instead; if the audit file cannot be put back, the archive loses its keys
+                if (!renamedFile.renameTo(auditLogFile)) {
+                    LOGGER.error("Unable to rename {} back to {}; the new audit file overwrites the keys of {} in {}",
+                            renamedFile, auditLogFile, renamedFile, keyStoreFile);
+                }
+                resetAndReopenWriter(topic);
+                throw new BadRequestException(
+                        format("Unable to rename file %s to %s when rotating", keyStoreFile, archivedKeyStoreFile));
+            }
+        }
+        resetAndReopenWriter(topic);
+        return rotatedFile;
     }
 
     private synchronized void closeWriter(final String topic) {
@@ -483,8 +513,8 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
             try {
                 writerToClose.close();
             } catch (Exception ex) {
-                // Debug level as the writer is expected to potentially be invalid
-                LOGGER.debug("File writer close in closeWriter reported failure ", ex);
+                // A tamper evident file that fails to close lacks its final signature, and fails verification
+                LOGGER.error("Unable to close the CSV file writer of topic {}", topic, ex);
             }
         }
     }
@@ -506,8 +536,13 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
         }
         if (auditFile.exists()) {
             try (ICsvMapReader reader = createCsvMapReader(auditFile)) {
+                final String[] fileHeader = reader.getHeader(true);
+                if (fileHeader == null) {
+                    // a tamper evident writer writes the header with the first event, so the file holds no event yet
+                    return results;
+                }
                 // the header elements are used to map the values to the bean (names must match)
-                final String[] header = convertDotNotationToSlashes(reader.getHeader(true));
+                final String[] header = convertDotNotationToSlashes(fileHeader);
                 final CellProcessor[] processors = createCellProcessors(auditEntryType, header);
                 Map<String, Object> entry;
                 while ((entry = reader.read(header, processors)) != null) {
@@ -543,7 +578,7 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
     /**
      * CellProcessor for parsing JsonValue objects from CSV file.
      */
-    public class ParseJsonValue implements CellProcessor {
+    public static class ParseJsonValue implements CellProcessor {
 
         @Override
         public Object execute(final Object value, final CsvContext context) {
@@ -571,17 +606,24 @@ public class CsvAuditEventHandler extends AuditEventHandlerBase {
     }
 
     private synchronized void cleanup() throws ResourceException {
-        try {
-            for (CsvWriter csvWriter : writers.values()) {
-                if (csvWriter != null) {
-                    csvWriter.flush();
-                    csvWriter.close();
+        IOException failure = null;
+        for (CsvWriter csvWriter : writers.values()) {
+            // every writer is closed, also when the flush or another writer fails: the scheduler of a tamper evident
+            // writer would keep the JVM from exiting
+            try (CsvWriter writer = csvWriter) {
+                writer.flush();
+            } catch (IOException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
                 }
             }
-        } catch (IOException e) {
-            LOGGER.error("Unable to close filewriters during {} cleanup", this.getClass().getName(), e);
+        }
+        if (failure != null) {
+            LOGGER.error("Unable to close filewriters during {} cleanup", this.getClass().getName(), failure);
             throw new InternalServerErrorException(
-                    "Unable to close filewriters during " + this.getClass().getName() + " cleanup", e);
+                    "Unable to close filewriters during " + this.getClass().getName() + " cleanup", failure);
         }
     }
 

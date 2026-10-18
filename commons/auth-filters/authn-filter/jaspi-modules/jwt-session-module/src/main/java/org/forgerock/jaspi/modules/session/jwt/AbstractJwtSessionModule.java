@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2013-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.jaspi.modules.session.jwt;
@@ -167,9 +168,9 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
             throw new AuthenticationException("Can't use both " + TOKEN_IDLE_TIME_IN_MINUTES_CLAIM_KEY
                     + " setting and the " + TOKEN_IDLE_TIME_IN_SECONDS_CLAIM_KEY + " setting.");
         } else if (!isEmpty(tokenIdleTimeMinutes)) {
-            this.tokenIdleTime = Integer.parseInt(tokenIdleTimeMinutes) * 60;
+            this.tokenIdleTime = parseIntSetting(TOKEN_IDLE_TIME_IN_MINUTES_CLAIM_KEY, tokenIdleTimeMinutes) * 60;
         } else if (!isEmpty(tokenIdleTimeSeconds)) {
-            this.tokenIdleTime = Integer.parseInt(tokenIdleTimeSeconds);
+            this.tokenIdleTime = parseIntSetting(TOKEN_IDLE_TIME_IN_SECONDS_CLAIM_KEY, tokenIdleTimeSeconds);
         } else {
             this.tokenIdleTime = 0;
         }
@@ -179,9 +180,9 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
             throw new AuthenticationException("Can't use both the " + MAX_TOKEN_LIFE_IN_MINUTES_KEY
                     + " setting and the " + MAX_TOKEN_LIFE_IN_SECONDS_KEY + " setting.");
         } else if (!isEmpty(maxTokenLifeMinutes)) {
-            this.maxTokenLife = Integer.parseInt(maxTokenLifeMinutes) * 60;
+            this.maxTokenLife = parseIntSetting(MAX_TOKEN_LIFE_IN_MINUTES_KEY, maxTokenLifeMinutes) * 60;
         } else if (!isEmpty(maxTokenLifeSeconds)) {
-            this.maxTokenLife = Integer.parseInt(maxTokenLifeSeconds);
+            this.maxTokenLife = parseIntSetting(MAX_TOKEN_LIFE_IN_SECONDS_KEY, maxTokenLifeSeconds);
         } else {
             this.maxTokenLife = 0;
         }
@@ -190,7 +191,9 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
         Boolean httpOnly = (Boolean) options.get(HTTP_ONLY_COOKIE_KEY);
         this.isHttpOnly = httpOnly == null ? false : httpOnly;
         Boolean secure = (Boolean) options.get(SECURE_COOKIE_KEY);
-        this.isSecure = secure == null ? false : secure;
+        // Secure-by-default: session cookies carry the Secure attribute unless the
+        // deployment explicitly opts out with isSecure=false (CodeQL java/insecure-cookie).
+        this.isSecure = secure == null ? true : secure;
         cookieDomains = (Collection<String>) options.get(COOKIE_DOMAINS_KEY);
         if (cookieDomains == null || cookieDomains.isEmpty()) {
             cookieDomains = Collections.singleton(null);
@@ -201,6 +204,14 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
         }
         this.signingHandler = new HmacSigningHandler(signingKey);
         Arrays.fill(signingKey, (byte) 0);
+    }
+
+    private static int parseIntSetting(final String settingName, final String value) throws AuthenticationException {
+        try {
+            return Integer.parseInt(value);
+        } catch (final NumberFormatException e) {
+            throw new AuthenticationException("The " + settingName + " setting must be an integer, but was: " + value);
+        }
     }
 
     /**
@@ -248,7 +259,7 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
      * @return <code>true</code> if the String is non-null and non-empty.
      */
     private boolean isEmpty(String s) {
-        return s == null || "".equals(s);
+        return s == null || s.isEmpty();
     }
 
     /**
@@ -547,13 +558,13 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
                 .enc(EncryptionMethod.A128CBC_HS256)
                 .done()
                 .claims(claimsSet)
-                .sign(signingHandler, SIGNING_ALGORITHM)
+                .signedWith(signingHandler, SIGNING_ALGORITHM)
                 .build();
     }
 
     /**
      * Returns the max age for the cookie, based on whether the cookie should be browser session only.
-     * <br/>
+     * <br>
      * If the cookie is only meant to last the same length the users browser is open, then the max age is set to -1.
      * Otherwise the max age is set to expiry time.
      *
@@ -562,7 +573,7 @@ abstract class AbstractJwtSessionModule<C extends JwtSessionCookie> {
      */
     private int getCookieMaxAge(Date now, Date exp) {
         if (!browserSessionOnly) {
-            return new Long((exp.getTime() - now.getTime()) / 1000L).intValue();
+            return Long.valueOf((exp.getTime() - now.getTime()) / 1000L).intValue();
         } else {
             return -1;
         }

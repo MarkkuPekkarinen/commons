@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2013-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.json.jose.jwt;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.forgerock.json.JsonValue;
+import org.forgerock.json.jose.exceptions.JwtRuntimeException;
 import org.forgerock.json.jose.utils.IntDate;
 import org.forgerock.json.jose.utils.StringOrURI;
 
@@ -314,7 +316,7 @@ public class JwtClaimsSet extends JWObject implements Payload {
     /**
      * Sets a claim with the specified name and value.
      * <p>
-     * If the key matches one of the reserved claim names, then the relevant <tt>set</tt> method is called to set that
+     * If the key matches one of the reserved claim names, then the relevant <code>set</code> method is called to set that
      * claim with the specified name and value.
      *
      * @param key The claim name.
@@ -396,7 +398,11 @@ public class JwtClaimsSet extends JWObject implements Payload {
             if (isValueOfType(value, Number.class)) {
                 setExpirationTime(((Number) value).longValue());
             } else if (isValueOfType(value, String.class)) {
-            	setExpirationTime(Long.parseLong((String)value));
+                try {
+                    setExpirationTime(Long.parseLong((String) value));
+                } catch (final NumberFormatException e) {
+                    throw new JwtRuntimeException("Expiration time claim (exp) is not a valid number: " + value, e);
+                }
             } else {
                 checkValueIsOfType(value, Date.class);
                 setExpirationTime((Date) value);
@@ -423,7 +429,7 @@ public class JwtClaimsSet extends JWObject implements Payload {
     /**
      * Gets a claim value for the specified key.
      * <p>
-     * If the key matches one of the reserved claim names, then the relevant <tt>get</tt> method is called to get that
+     * If the key matches one of the reserved claim names, then the relevant <code>get</code> method is called to get that
      * claim value.
      *
      * @param key The claim name.
@@ -494,6 +500,7 @@ public class JwtClaimsSet extends JWObject implements Payload {
      *
      * @return A JSON string.
      */
+    @Override
     public String build() {
         return toString();
     }

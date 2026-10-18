@@ -2,6 +2,7 @@
  * DO NOT REMOVE COPYRIGHT NOTICES OR THIS HEADER.
  *
  * Copyright (c) 2012-2013 ForgeRock AS. All rights reserved.
+ * Portions copyright 2026 3A Systems LLC.
  *
  * The contents of this file are subject to the terms
  * of the Common Development and Distribution License
@@ -20,6 +21,7 @@
  * with the fields enclosed by brackets [] replaced by
  * your own identifying information:
  * "Portions Copyrighted [year] [name of copyright owner]"
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package org.forgerock.script.engine;
@@ -66,22 +68,15 @@ public class Utils {
     }
 
     public static void copyURLToFile(URL in, File out) throws IOException {
-        ReadableByteChannel inChannel = Channels.newChannel(in.openStream());
-        FileChannel outChannel = new FileOutputStream(out).getChannel();
-        try {
+        try (ReadableByteChannel inChannel = Channels.newChannel(in.openStream());
+                FileOutputStream outStream = new FileOutputStream(out);
+                FileChannel outChannel = outStream.getChannel()) {
             outChannel.transferFrom(inChannel, 0, 1 << 24);
-        } catch (IOException e) {
-            throw e;
-        } finally {
-            if (inChannel != null) {
-                inChannel.close();
-            }
-            outChannel.close();
         }
     }
 
     /**
-     * Read large > 5Mb text files to String.
+     * Read large &gt; 5Mb text files to String.
      *
      * @param file
      *            source file
@@ -90,15 +85,16 @@ public class Utils {
      *             when the source {@code file} can not be read
      */
     public final static String readLargeFile(File file) throws IOException {
-        FileChannel channel = new FileInputStream(file).getChannel();
-        ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
-        channel.read(buffer);
-        channel.close();
-        return new String(buffer.array());
+        try (FileInputStream stream = new FileInputStream(file)) {
+            FileChannel channel = stream.getChannel();
+            ByteBuffer buffer = ByteBuffer.allocate((int) channel.size());
+            channel.read(buffer);
+            return new String(buffer.array());
+        }
     }
 
     /**
-     * Read small < 5Mb text files to String.
+     * Read small &lt; 5Mb text files to String.
      *
      * @param file
      *            source file
@@ -210,10 +206,13 @@ public class Utils {
      * Executes the given script with the appropriate context information.
      *
      * @param context
+     *            the context information used to evaluate the script.
      * @param scriptPair
      *            The script to execute
-     * @return
+     * @return the result of evaluating the script, or {@code null} if no script
+     *         was provided.
      * @throws ResourceException
+     *             if the script is inactive or its evaluation fails.
      */
     public static Object evaluateScript(final Context context,
             final Pair<JsonPointer, ScriptEntry> scriptPair) throws ResourceException {
@@ -258,6 +257,6 @@ public class Utils {
         } catch (final Throwable tmp) {
             resourceResultCode = ResourceException.INTERNAL_ERROR;
         }
-        return ResourceException.getException(resourceResultCode, t.getMessage(), t);
+        return ResourceException.newResourceException(resourceResultCode, t.getMessage(), t);
     }
 }

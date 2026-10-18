@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 
 package org.forgerock.audit.handlers.jms;
@@ -20,10 +21,10 @@ import static org.forgerock.audit.util.ResourceExceptionsUtil.*;
 import static org.forgerock.json.JsonValue.*;
 import static org.forgerock.json.resource.Responses.newResourceResponse;
 
-import javax.inject.Inject;
-import javax.jms.JMSException;
-import javax.jms.MessageProducer;
-import javax.jms.Session;
+import jakarta.inject.Inject;
+import jakarta.jms.JMSException;
+import jakarta.jms.MessageProducer;
+import jakarta.jms.Session;
 import java.util.Collections;
 import java.util.List;
 
@@ -118,6 +119,7 @@ public class JmsAuditEventHandler extends AuditEventHandlerBase {
      * @param auditEvent The event to convert to a JMS TextMessage and publish on the JMS Topic.
      * @return a promise with either a response or an exception
      */
+    @Override
     public Promise<ResourceResponse, ResourceException> publishEvent(Context context, String auditTopic,
             JsonValue auditEvent) {
         try {
@@ -199,7 +201,7 @@ public class JmsAuditEventHandler extends AuditEventHandlerBase {
 
     /**
      * Returns NotSupportedException as query is not implemented for JMS.
-     * <br/>
+     * <br>
      * {@inheritDoc}
      * @return NotSupportedException as query is not implemented for JMS.
      */
@@ -214,7 +216,7 @@ public class JmsAuditEventHandler extends AuditEventHandlerBase {
 
     /**
      * Returns NotSupportedException as read is not implemented for JMS.
-     * <br/>
+     * <br>
      * {@inheritDoc}
      * @return NotSupportedException as read is not implemented for JMS.
      */

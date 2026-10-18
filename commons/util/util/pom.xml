@@ -12,13 +12,14 @@
   ~ information: "Portions copyright [year] [name of copyright owner]".
   ~
   ~ Copyright 2015 ForgeRock AS.
+  ~ Portions copyright 2025-2026 3A Systems LLC.
   -->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>org.openidentityplatform.commons</groupId>
         <artifactId>util-parent</artifactId>
-        <version>2.1.2-SNAPSHOT</version>
+        <version>3.2.2-SNAPSHOT</version>
     </parent>
     <artifactId>util</artifactId>
     <name>${project.groupId}.${project.artifactId}</name>
@@ -34,10 +35,13 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
         <dependency>
-		    <groupId>org.openjdk.nashorn</groupId>
-		    <artifactId>nashorn-core</artifactId>
-		    <version>15.4</version>
-		</dependency>
+            <groupId>org.mozilla</groupId>
+            <artifactId>rhino</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mozilla</groupId>
+            <artifactId>rhino-engine</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
@@ -78,6 +82,14 @@
                 <groupId>org.apache.felix</groupId>
                 <artifactId>maven-bundle-plugin</artifactId>
                 <extensions>true</extensions>
+                <configuration>
+                    <instructions>
+                        <Import-Package>
+                            org.apache.xerces.util;resolution:=optional,
+                            *
+                        </Import-Package>
+                    </instructions>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

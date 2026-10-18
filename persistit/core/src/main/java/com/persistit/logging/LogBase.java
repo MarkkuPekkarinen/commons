@@ -12,6 +12,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit.logging;
@@ -41,7 +42,6 @@ import com.persistit.logging.PersistitLogMessage.LogItem;
  * depending on the currently configured log level. An enabled
  * <code>LogItem</code> actually issues a log message, while a disabled
  * <code>LogItem</code> does nothing.
- * </p>
  */
 public class LogBase {
 
@@ -208,6 +208,9 @@ public class LogBase {
 
     @Message("INFO|Waited %,d seconds for IO operations to finish")
     public final LogItem waitForClose = PersistitLogMessage.empty();
+
+    @Message("WARNING|Fast close proceeding after waiting %,dms for a checkpoint, copy-back pass or close in progress")
+    public final LogItem fastCloseCheckpointTimeout = PersistitLogMessage.empty();
 
     @Message("ERROR|Checkpoint %s written to journal before dirty page %d")
     public final LogItem lateWrite = PersistitLogMessage.empty();

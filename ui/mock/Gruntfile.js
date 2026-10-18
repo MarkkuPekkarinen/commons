@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2020-2025 3A Systems LLC.
  */
 
 module.exports = function (grunt) {
@@ -27,17 +28,17 @@ module.exports = function (grunt) {
         testTargetDirectory = "target/test",
         sourceDirectory = "src/main/js",
         watchDirs = [
-            "../forgerock-ui-commons/src/main/js",
-            "../forgerock-ui-commons/src/main/resources",
-            "../forgerock-ui-user/src/main/js",
-            "../forgerock-ui-user/src/main/resources",
+            "../commons/src/main/js",
+            "../commons/src/main/resources",
+            "../user/src/main/js",
+            "../user/src/main/resources",
             "src/main/js",
             "src/main/resources"
         ],
         testWatchDirs = {
             "src/test/qunit": "/",
-            "../forgerock-ui-commons/src/test/qunit": "/tests/commons/",
-            "../forgerock-ui-user/src/test/qunit": "/tests/user/"
+            "../commons/src/test/qunit": "/tests/commons/",
+            "../user/src/test/qunit": "/tests/user/"
         };
 
     grunt.initConfig({
@@ -77,7 +78,20 @@ module.exports = function (grunt) {
             }
         },
         qunit: {
-            all: [testTargetDirectory + "/index.html"]
+            all: [testTargetDirectory + "/index.html"],
+            options: {
+                timeout: 20000,
+                puppeteer: {
+                    ignoreDefaultArgs: true,
+                    args: [
+                        "--headless=new",
+                        "--allow-file-access-from-files",
+                        "--disable-dev-shm-usage",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox"
+                    ]
+                }
+            }
         },
         requirejs: {
             /**
@@ -107,7 +121,7 @@ module.exports = function (grunt) {
         notify_hooks: {
             options: {
                 enabled: true,
-                title: "ForgeRock UI QUnit Tests"
+                title: "UI QUnit Tests"
             }
         },
         /**

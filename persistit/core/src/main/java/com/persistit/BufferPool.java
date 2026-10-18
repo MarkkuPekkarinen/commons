@@ -1,6 +1,7 @@
 /**
  * Copyright 2005-2012 Akiban Technologies, Inc.
  * Copyright 2015 ForgeRock AS
+ * Portions Copyrighted 2026 3A Systems, LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +14,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ * Portions Copyrighted 2026 3A Systems, LLC
  */
 
 package com.persistit;
@@ -279,6 +281,8 @@ public class BufferPool {
             // Note: written this way to try to avoid another OOME.
             // Do not use String.format here.
             //
+            // Release the reserved block to free memory for the diagnostic
+            // path below.
             reserve = null;
             System.err.print("Out of memory with ");
             System.err.print(Runtime.getRuntime().freeMemory());
@@ -542,6 +546,7 @@ public class BufferPool {
      * @param volume
      *            The volume
      * @throws PersistitInterruptedException
+     *             if the thread was interrupted while waiting for I/O
      */
     boolean invalidate(final Volume volume) throws PersistitException {
         final float ratio = (float) volume.getStorage().getNextAvailablePage() / (float) _bufferCount;
@@ -564,12 +569,12 @@ public class BufferPool {
             _hashLocks[hashIndex % HASH_LOCKS].lock();
             try {
                 for (Buffer buffer = _hashTable[hashIndex]; buffer != null; buffer = buffer.getNext()) {
-                    if ((buffer.getVolume() == volume || volume == null) && !buffer.isFixed() && buffer.isValid()) {
+                    if ((buffer.getVolume() == volume) && !buffer.isFixed() && buffer.isValid()) {
                         if (buffer.claim(true, 0)) {
                             // re-check after claim
                             boolean invalidated = false;
                             try {
-                                if ((buffer.getVolume() == volume || volume == null) && !buffer.isFixed()
+                                if ((buffer.getVolume() == volume) && !buffer.isFixed()
                                         && buffer.isValid()) {
                                     if (mustWrite && buffer.isDirty()) {
                                         buffer.writePage();
@@ -736,12 +741,13 @@ public class BufferPool {
      *            throwing an InUseException
      * @return Buffer The Buffer describing the buffer containing the page.
      * @throws InUseException
-     *             if the specific lock could not be acquired within the
-     *             specified timeout
+     *             if the specific lock could not be acquired or no buffer
+     *             could be allocated for the page within the specified timeout
      */
     Buffer get(final Volume vol, final long page, final boolean writer, final boolean wantRead, final long timeout)
             throws PersistitException {
         final int hash = hashIndex(vol, page);
+        final long start = System.currentTimeMillis();
         Buffer buffer = null;
 
         for (;;) {
@@ -777,34 +783,52 @@ public class BufferPool {
                     // in the page from the Volume.
                     //
                     buffer = allocBuffer();
-                    Debug.$assert1.t(!buffer.isDirty());
-                    Debug.$assert0.t(buffer != _hashTable[hash]);
-                    Debug.$assert0.t(buffer.getNext() != buffer);
+                    if (buffer != null) {
+                        Debug.$assert1.t(!buffer.isDirty());
+                        Debug.$assert0.t(buffer != _hashTable[hash]);
+                        Debug.$assert0.t(buffer.getNext() != buffer);
 
-                    buffer.setPageAddressAndVolume(page, vol);
-                    buffer.setNext(_hashTable[hash]);
-                    _hashTable[hash] = buffer;
-                    //
-                    // It's not really valid yet, but it does have a writer
-                    // claim on it so no other Thread can access it. In the
-                    // meantime, any other Thread seeking access to the same
-                    // page will find it.
-                    //
-                    buffer.setValid();
-                    if (vol.isTemporary() || vol.isLockVolume()) {
-                        buffer.setTemporary();
-                    } else {
-                        buffer.clearTemporary();
+                        buffer.setPageAddressAndVolume(page, vol);
+                        buffer.setNext(_hashTable[hash]);
+                        _hashTable[hash] = buffer;
+                        //
+                        // It's not really valid yet, but it does have a writer
+                        // claim on it so no other Thread can access it. In the
+                        // meantime, any other Thread seeking access to the same
+                        // page will find it.
+                        //
+                        buffer.setValid();
+                        if (vol.isTemporary() || vol.isLockVolume()) {
+                            buffer.setTemporary();
+                        } else {
+                            buffer.clearTemporary();
+                        }
+                        Debug.$assert0.t(buffer.getNext() != buffer);
                     }
-                    Debug.$assert0.t(buffer.getNext() != buffer);
                 }
             } finally {
                 _hashLocks[hash % HASH_LOCKS].unlock();
             }
+            if (buffer == null) {
+                /*
+                 * allocBuffer() swept the whole pool without finding an
+                 * evictable buffer. Wait for one to be released and retry the
+                 * search until the timeout budget expires. The wait must
+                 * happen here, after the finally block above has released the
+                 * hash lock, so that no thread sleeps while holding a lock
+                 * stripe.
+                 */
+                if (System.currentTimeMillis() - start >= timeout) {
+                    throw new InUseException("Thread " + Thread.currentThread().getName()
+                            + " failed to allocate a buffer for page " + page + " in " + vol + " within " + timeout
+                            + " ms");
+                }
+                Util.sleep(RETRY_SLEEP_TIME);
+                continue;
+            }
             if (mustClaim) {
                 boolean claimed = false;
                 boolean same = true;
-                final long start = System.currentTimeMillis();
                 while (same && !claimed && System.currentTimeMillis() - start < timeout) {
                     /*
                      * We're here because we found the page we want, but another
@@ -890,14 +914,18 @@ public class BufferPool {
      * Buffer should be used only for display and diagnostic purposes.
      *
      * @param vol
+     *            the <code>Volume</code> containing the page to copy
      * @param page
+     *            the page address of the page to copy
      * @return Copy of the Buffer
      * @throws InvalidPageAddressException
+     *             if the supplied page address is invalid
      * @throws InvalidPageStructureException
+     *             if the page image is corrupt
      * @throws VolumeClosedException
+     *             if the volume has been closed
      * @throws PersistitInterruptedException
-     * @throws RetryException
-     * @throws IOException
+     *             if the thread was interrupted while waiting for I/O
      */
     public Buffer getBufferCopy(final Volume vol, final long page) throws InvalidPageAddressException,
             InvalidPageStructureException, VolumeClosedException, InUseException, PersistitIOException,
@@ -953,8 +981,7 @@ public class BufferPool {
      * @return Buffer An available buffer, or <i>null</i> if no buffer is
      *         currently available. The buffer has a writer claim.
      * @throws PersistitException
-     * @throws IllegalStateException
-     *             if there is no available buffer.
+     *             if a persistence error occurs while evicting a page
      */
 
     private Buffer allocBuffer() throws PersistitException {
@@ -1060,7 +1087,7 @@ public class BufferPool {
             }
             retry++;
         }
-        throw new IllegalStateException("No available Buffers");
+        return null;
     }
 
     enum Result {
@@ -1328,6 +1355,7 @@ public class BufferPool {
          * Used to sort buffers in ascending page address order by volume.
          *
          * @param buffer
+         *            the <code>BufferHolder</code> to compare with
          * @return -1, 0 or 1 as this <code>Buffer</code> falls before, a, or
          *         after the supplied <code>Buffer</code> in the desired page
          *         address order.
@@ -1337,6 +1365,22 @@ public class BufferPool {
             return _volumeId > buffer._volumeId ? 1 : _volumeId < buffer._volumeId ? -1 : _page > buffer._page ? 1
                     : _page < buffer._page ? -1 : 0;
 
+        }
+
+        /**
+         * Equality is defined by the same (volumeId, page) ordering key used by
+         * {@link #compareTo(BufferHolder)}, so that {@code equals} stays
+         * consistent with the natural ordering.
+         */
+        @Override
+        public boolean equals(final Object object) {
+            return this == object
+                    || (object instanceof BufferHolder && compareTo((BufferHolder) object) == 0);
+        }
+
+        @Override
+        public int hashCode() {
+            return Long.hashCode(_volumeId) * 31 + Long.hashCode(_page);
         }
 
         @Override
@@ -1398,7 +1442,9 @@ public class BufferPool {
 
     /**
      * @param i
+     *            the index of the buffer within this pool
      * @param detail
+     *            <code>true</code> to include detailed buffer state
      * @return toString value for buffer at index <code>i</code>.
      */
     String toString(final int i, final boolean detail) {
@@ -1421,6 +1467,7 @@ public class BufferPool {
      * @param secure
      *            true to obscure data values in the dump
      * @throws Exception
+     *             if an error occurs while writing the dump
      */
     void dump(final DataOutputStream stream, final ByteBuffer bb, final boolean secure, final boolean verbose)
             throws Exception {

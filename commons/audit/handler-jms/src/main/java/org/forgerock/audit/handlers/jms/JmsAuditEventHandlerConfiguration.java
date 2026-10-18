@@ -12,13 +12,14 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions copyright 2024-2026 3A Systems LLC.
  */
 
 package org.forgerock.audit.handlers.jms;
 
-import javax.jms.ConnectionFactory;
-import javax.jms.Session;
-import javax.jms.Topic;
+import jakarta.jms.ConnectionFactory;
+import jakarta.jms.Session;
+import jakarta.jms.Topic;
 import javax.naming.InitialContext;
 import java.util.Collections;
 import java.util.Map;
@@ -30,9 +31,8 @@ import org.forgerock.util.Reject;
 
 /**
  * Configuration object for the {@link JmsAuditEventHandler}.
- * <p/>
+ * <p>
  * This configuration object can be created from JSON. Example of valid JSON configuration:
- * <p/>
  * <pre>
  * {
  *     "name" : "jms",

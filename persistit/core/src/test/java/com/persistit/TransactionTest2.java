@@ -1,6 +1,8 @@
 /**
  * Copyright 2005-2012 Akiban Technologies, Inc.
  * 
+ * Portions Copyrighted 2026 3A Systems, LLC.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -23,7 +25,7 @@ import com.persistit.exception.PersistitIOException;
 import com.persistit.exception.PersistitInterruptedException;
 import com.persistit.exception.RollbackException;
 
-import org.junit.Ignore;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.InterruptedIOException;
@@ -33,6 +35,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -61,8 +64,21 @@ public class TransactionTest2 extends PersistitUnitTestCase {
     static AtomicInteger _completedTransactionCount = new AtomicInteger();
     static AtomicInteger _failedTransactionCount = new AtomicInteger();
     static AtomicInteger _strandedThreads = new AtomicInteger();
+    static AtomicReference<Throwable> _firstFailure = new AtomicReference<Throwable>();
 
     static int _threadCounter = 0;
+
+    /*
+     * The counters are static and shared by every test in this class; reset
+     * them so each test's assertions see only its own failures.
+     */
+    @Before
+    public void resetCounters() {
+        _retriedTransactionCount.set(0);
+        _completedTransactionCount.set(0);
+        _failedTransactionCount.set(0);
+        _firstFailure.set(null);
+    }
 
     int _threadIndex = 0;
 
@@ -227,6 +243,8 @@ public class TransactionTest2 extends PersistitUnitTestCase {
         assertEquals("Starting and ending balance don't agree", startingBalance, endingBalance);
         assertTrue("ATC has very old transaction",
                 ti.getActiveTransactionCeiling() - ti.getActiveTransactionFloor() < 10000);
+        assertEquals("Worker threads died with unexpected exceptions; first was " + _firstFailure.get(), 0,
+                _failedTransactionCount.get());
     }
 
     @Test(expected = IllegalStateException.class)
@@ -244,30 +262,39 @@ public class TransactionTest2 extends PersistitUnitTestCase {
     }
 
     @Test
-   @Ignore
     public void transactionsConcurrentWithPersistitClose() throws Exception {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final Thread[] threadArray = new Thread[_threadCount];
-                for (int index = 0; index < _threadCount; index++) {
-                    threadArray[index] = new Thread(new Runnable() {
-                        @Override
-                        public void run() {
-                            runIt(Integer.MAX_VALUE);
-                        }
-                    }, "TransactionThread_" + index);
+        _strandedThreads.set(0);
+        final Thread[] threadArray = new Thread[_threadCount];
+        for (int index = 0; index < _threadCount; index++) {
+            threadArray[index] = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    runIt(Integer.MAX_VALUE);
                 }
-                for (int index = 0; index < _threadCount; index++) {
-                    threadArray[index].start();
-                }
-            }
-        }).start();
+            }, "TransactionThread_" + index);
+        }
+        for (int index = 0; index < _threadCount; index++) {
+            threadArray[index].start();
+        }
         /*
          * Let the threads crank up
          */
         Thread.sleep(1000);
         _persistit.close();
+        /*
+         * Closing Persistit makes the worker threads unwind by throwing one of
+         * the expected exceptions, but that unwinding is asynchronous. Give the
+         * threads a bounded amount of time to observe the closure and exit
+         * before checking that none were left stranded; otherwise a worker that
+         * has not yet caught its exception produces a spurious failure.
+         */
+        final long deadline = System.currentTimeMillis() + TIMEOUT;
+        for (final Thread thread : threadArray) {
+            final long remaining = deadline - System.currentTimeMillis();
+            if (remaining > 0) {
+                thread.join(remaining);
+            }
+        }
         assertEquals("All threads should have exited correctly", 0, _strandedThreads.get());
     }
 
@@ -304,10 +331,15 @@ public class TransactionTest2 extends PersistitUnitTestCase {
                 // expected
             } else {
                 exception.printStackTrace();
+                _firstFailure.compareAndSet(null, exception);
                 _failedTransactionCount.incrementAndGet();
             }
-        } catch (final Exception exception) {
-            exception.printStackTrace();
+        } catch (final Throwable throwable) {
+            // Catch Throwable, not Exception: an internal Error such as an
+            // AssertionError must be reported and counted rather than
+            // silently killing the worker thread (see issue #265).
+            throwable.printStackTrace();
+            _firstFailure.compareAndSet(null, throwable);
             _failedTransactionCount.incrementAndGet();
         }
     }

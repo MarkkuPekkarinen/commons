@@ -12,6 +12,7 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC.
  */
 
 package org.forgerock.api;
@@ -75,7 +76,7 @@ public class CrestApiProducer implements ApiProducer<ApiDescription> {
         Paths.Builder paths = paths();
         Set<String> names = api.getPaths().getNames();
         for (String subpath : names) {
-            paths.put(subpath.equals("") ? parentPath : parentPath + "/" + subpath,
+            paths.put(subpath.isEmpty() ? parentPath : parentPath + "/" + subpath,
                     api.getPaths().get(subpath));
         }
         return createApi(api.getDefinitions(), api.getErrors(), api.getServices(), paths.build());
@@ -90,7 +91,8 @@ public class CrestApiProducer implements ApiProducer<ApiDescription> {
             if (singleton(UNVERSIONED).equals(versionedPath.getVersions())) {
                 paths.put(path, versionedPath().put(version, versionedPath.get(UNVERSIONED)).build());
             } else {
-                throw new IllegalStateException("Trying to version something already versioned: " + versionedPath);
+                throw new IllegalStateException(
+                        "Trying to version something already versioned: " + versionedPath.getVersions());
             }
         }
         return createApi(api.getDefinitions(), api.getErrors(), api.getServices(), paths.build());

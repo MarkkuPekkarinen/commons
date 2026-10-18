@@ -13,6 +13,7 @@
  *
  * Copyright © 2010–2011 ApexIdentity Inc. All rights reserved.
  * Portions Copyrighted 2011-2016 ForgeRock AS.
+ * Portions Copyrighted 2026 3A Systems, LLC.
  */
 
 package org.forgerock.json;
@@ -853,7 +854,7 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
         if (index < 0) {
             throw new JsonValueException(this, "List index out of range: " + index);
         }
-        if (isList() && index >= 0) {
+        if (isList()) {
             final List<Object> list = asList();
             if (index < list.size()) {
                 result = list.get(index);
@@ -1342,12 +1343,12 @@ public class JsonValue implements Cloneable, Iterable<JsonValue> {
         } else if (isMap()) {
             sb.append("{ ");
             final Map<Object, Object> map = (Map<Object, Object>) object;
-            for (final Iterator<Object> i = map.keySet().iterator(); i.hasNext();) {
-                final Object key = i.next();
+            for (final Iterator<Map.Entry<Object, Object>> i = map.entrySet().iterator(); i.hasNext();) {
+                final Map.Entry<Object, Object> entry = i.next();
                 sb.append('"');
-                appendEscapedString(sb, key.toString());
+                appendEscapedString(sb, entry.getKey().toString());
                 sb.append("\": ");
-                sb.append(new JsonValue(map.get(key)).toString()); // recursion
+                sb.append(new JsonValue(entry.getValue()).toString()); // recursion
                 if (i.hasNext()) {
                     sb.append(", ");
                 }
