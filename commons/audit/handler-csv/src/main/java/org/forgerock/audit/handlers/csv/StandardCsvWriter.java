@@ -24,6 +24,7 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import org.forgerock.audit.events.handlers.writers.AsynchronousTextWriter;
@@ -53,26 +54,28 @@ class StandardCsvWriter implements CsvWriter {
     StandardCsvWriter(File csvFile, String[] headers, CsvPreference csvPreference,
             CsvAuditEventHandlerConfiguration config) throws IOException {
         Reject.ifTrue(config.getSecurity().isEnabled(), "StandardCsvWriter should not be used if security is enabled");
+        this.headers = checkNotNull(headers, "The headers can't be null.");
         boolean fileAlreadyInitialized = csvFile.exists();
         if (fileAlreadyInitialized) {
-            try (ICsvMapReader reader = new CsvMapReader(new BufferedReader(new FileReader(csvFile)), csvPreference)) {
+            try (ICsvMapReader reader = new CsvMapReader(
+                    new BufferedReader(new FileReader(csvFile, StandardCharsets.UTF_8)), csvPreference)) {
                 final String[] actualHeaders = reader.getHeader(true);
                 // Assert that the 2 headers equals.
                 if (actualHeaders == null) {
                     fileAlreadyInitialized = false;
                 } else {
-//                    if (actualHeaders.length != headers.length) {
-//                        throw new IOException("Resuming an existing CSV file but the headers do not match.");
-//                     }
+                    if (actualHeaders.length != headers.length) {
+                        throw new IOException("Resuming an existing CSV file but the headers do not match.");
+                    }
                     for (int idx = 0; idx < actualHeaders.length; idx++) {
-                        if (!actualHeaders[idx].equals(headers[idx])) {
+                        // Super CSV reads an empty column name as null, the expected headers hold none
+                        if (!headers[idx].equals(actualHeaders[idx])) {
                             throw new IOException("Resuming an existing CSV file but the headers do not match.");
                         }
                     }
                 }
             }
         }
-        this.headers = checkNotNull(headers, "The headers can't be null.");
         csvFormatter = new CsvFormatter(csvPreference);
         csvWriter = constructWriter(csvFile, fileAlreadyInitialized, config);
 
@@ -81,8 +84,18 @@ class StandardCsvWriter implements CsvWriter {
         }
 
         if (!fileAlreadyInitialized) {
-            writeHeader(headers);
-            csvWriter.flush();
+            try {
+                writeHeader(headers);
+                csvWriter.flush();
+            } catch (IOException e) {
+                // The caller gets no writer to close: close the file, and the rotator thread with rotation.
+                try {
+                    csvWriter.close();
+                } catch (IOException | RuntimeException closeFailure) {
+                    e.addSuppressed(closeFailure);
+                }
+                throw e;
+            }
         }
     }
 

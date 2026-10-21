@@ -12,10 +12,13 @@
  * information: "Portions copyright [year] [name of copyright owner]".
  *
  * Copyright 2015-2016 ForgeRock AS.
+ * Portions Copyright 2026 3A Systems, LLC.
  */
 package org.forgerock.audit.handlers.csv;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 import static org.forgerock.audit.handlers.csv.SecureCsvWriterTest.KEYSTORE_FILENAME;
 import static org.forgerock.audit.handlers.csv.SecureCsvWriterTest.KEYSTORE_PASSWORD;
@@ -42,6 +45,7 @@ import org.forgerock.util.encode.Base64;
 import org.joda.time.format.DateTimeFormat;
 import org.supercsv.prefs.CsvPreference;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 @SuppressWarnings("javadoc")
@@ -49,6 +53,9 @@ public class CsvWriterTest {
 
     public static final String TIME_STAMP_FORMAT = "-MM.dd.yy-HH.mm.ss.SSS";
     public static final String PREFIX = "Prefix-";
+    /** "Grüße-Привет": letters of ISO-8859-1 and letters that no single-byte Western charset holds. */
+    static final String NON_ASCII_VALUE = "Grüße-Привет";
+    private static final String[] SECURE_CSV_HEADER = new String[] { "child1", "child2", "child3" };
 
     private KeyStoreHandlerDecorator keyStoreHandler;
     private Random random;
@@ -144,9 +151,97 @@ public class CsvWriterTest {
             new SecureCsvWriter(csvFile, new String[] { "child1", "child2", "child3", "enfant4" }, csvPreference,
                     configuration, keyStoreHandler, random);
             fail("Should have failed because headers do not match.");
-        } catch (RuntimeException e) {
+        } catch (IOException e) {
             // This is ok, we expect to have this exception.
+            assertThat(e).hasMessageContaining("the headers do not match");
         }
+    }
+
+    @DataProvider
+    private Object[][] headersThatDoNotMatch() {
+        return new Object[][] {
+            // a field was removed from the end of the topic schema
+            { "child1,child2,child3,child4" },
+            // a field was added to the end of the topic schema
+            { "child1,child2" },
+            // Super CSV reads an empty column name as null
+            { "child1,,child3" },
+            { "child1,child2," },
+        };
+    }
+
+    @Test(dataProvider = "headersThatDoNotMatch")
+    public void shouldNotResumeCsvFileWithHeadersThatDoNotMatch(String fileHeaders) throws Exception {
+        final Path csvFile = Files.createTempFile("CsvWriterTest", ".csv");
+        csvFile.toFile().deleteOnExit();
+        Files.write(csvFile, List.of(fileHeaders));
+
+        try {
+            new StandardCsvWriter(csvFile.toFile(), new String[] { "child1", "child2", "child3" },
+                    CsvPreference.EXCEL_PREFERENCE, new CsvAuditEventHandlerConfiguration());
+            fail("Should have failed because headers do not match.");
+        } catch (IOException e) {
+            assertThat(e).hasMessage("Resuming an existing CSV file but the headers do not match.");
+        }
+        assertThat(Files.readAllLines(csvFile, UTF_8)).containsExactly(fileHeaders);
+    }
+
+    @Test
+    public void shouldRejectNullHeadersWhenResumingCsvFile() throws Exception {
+        final Path csvFile = Files.createTempFile("CsvWriterTest", ".csv");
+        csvFile.toFile().deleteOnExit();
+        Files.write(csvFile, List.of("child1,child2,child3"));
+
+        try {
+            new StandardCsvWriter(csvFile.toFile(), null, CsvPreference.EXCEL_PREFERENCE,
+                    new CsvAuditEventHandlerConfiguration());
+            fail("Should have failed because headers are null.");
+        } catch (NullPointerException e) {
+            assertThat(e).hasMessage("The headers can't be null.");
+        }
+    }
+
+    @Test
+    public void shouldNotResumeCsvSecureFileWithEmptyColumnName() throws Exception {
+        final CsvPreference csvPreference = CsvPreference.EXCEL_PREFERENCE;
+        final String[] header = new String[] { "child1", "child2", "child3" };
+
+        final Path logDirectory = Files.createTempDirectory("CsvWriterTest");
+        logDirectory.toFile().deleteOnExit();
+        File csvFile = new File(logDirectory.toFile(), "shouldNotResumeCsvSecureFileWithEmptyColumnName.csv");
+
+        EventBufferingConfiguration bufferConfig = new EventBufferingConfiguration();
+        bufferConfig.setEnabled(false);
+        CsvSecurity csvSecurity = new CsvSecurity();
+        csvSecurity.setEnabled(true);
+        csvSecurity.setSignatureInterval("3 seconds");
+        CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+        configuration.setBufferingConfiguration(bufferConfig);
+        configuration.setSecurity(csvSecurity);
+        try (SecureCsvWriter writer = new SecureCsvWriter(csvFile, header, csvPreference, configuration,
+                keyStoreHandler, random)) {
+            Map<String, String> values = new HashMap<>(2);
+            values.put(header[0], "one-a");
+            values.put(header[2], "one-c");
+            writer.writeEvent(values);
+        }
+
+        // child2 is empty in every row, so a row HMAC of the values alone does not change without its name
+        final List<String> lines = Files.readAllLines(csvFile.toPath(), UTF_8);
+        lines.set(0, lines.get(0).replace("child2", ""));
+        Files.write(csvFile.toPath(), lines, UTF_8);
+
+        try {
+            new SecureCsvWriter(csvFile, header, csvPreference, configuration, keyStoreHandler, random);
+            fail("Should have failed because headers do not match.");
+        } catch (IOException | RuntimeException e) {
+            // The constructor throws the IOException as it is, or wraps it in a RuntimeException. The file fails the
+            // header check, or the verification when the row HMAC covers the column names.
+            final Throwable failure = e instanceof IOException ? e : e.getCause();
+            assertThat(failure).isInstanceOf(IOException.class).hasMessageMatching(
+                    "Resuming an existing CSV file but the headers do not match\\.|The CSV file was tampered: .*");
+        }
+        assertThat(Files.readAllLines(csvFile.toPath(), UTF_8)).isEqualTo(lines);
     }
 
     @Test
@@ -165,9 +260,181 @@ public class CsvWriterTest {
         final StandardCsvWriter csvWriter = new StandardCsvWriter(csvFile, headers, csvPreference, configuration);
         csvWriter.close();
 
-        final List<String> contents = Files.readAllLines(csvFile.toPath(), Charset.defaultCharset());
+        final List<String> contents = Files.readAllLines(csvFile.toPath(), UTF_8);
         assertThat(contents.size()).isEqualTo(1);
         assertThat(contents.get(0)).isEqualTo("child1,child2,child3");
+    }
+
+    @Test
+    public void shouldRunWithDefaultCharsetOtherThanUtf8() {
+        // the pom runs these tests with JAVA_TOOL_OPTIONS=-Dfile.encoding=windows-1252: with a UTF-8 default charset,
+        // a reader or a writer of the audit files that uses the default charset passes the tests of the charset
+        assertThat(Charset.defaultCharset()).as("the default charset of the test JVM").isNotEqualTo(UTF_8);
+    }
+
+    @DataProvider
+    private Object[][] rotationEnabled() {
+        return new Object[][] { { false }, { true } };
+    }
+
+    @Test(dataProvider = "rotationEnabled")
+    public void shouldWriteAndVerifyNonAsciiValuesInUtf8(final boolean rotationEnabled) throws Exception {
+        final File csvFile = writeSecureCsvFile(rotationEnabled, NON_ASCII_VALUE);
+
+        // in UTF-8 whatever the default charset, as the HMAC is computed over the UTF-8 bytes of the values
+        assertThat(csvFile).content(UTF_8).contains(NON_ASCII_VALUE);
+        final CsvSecureVerifier.VerificationResult result = verifySecureCsvFile(csvFile);
+        assertThat(result.hasPassedVerification()).as(result.getFailureReason()).isTrue();
+    }
+
+    @Test
+    public void shouldNotVerifyFileNotInUtf8() throws Exception {
+        // "Grüße": letters that windows-1252 holds
+        final File csvFile = writeSecureCsvFile(false, "Grüße");
+        reencodeInWindows1252(csvFile);
+
+        final CsvSecureVerifier.VerificationResult result = verifySecureCsvFile(csvFile);
+        assertThat(result.hasPassedVerification()).isFalse();
+        assertThat(result.getFailureReason()).isEqualTo("The file is not valid UTF-8");
+    }
+
+    @Test
+    public void shouldNotResumeFileNotInUtf8() throws Exception {
+        final File csvFile = writeSecureCsvFile(false, "Grüße");
+        reencodeInWindows1252(csvFile);
+
+        // the stack trace, as the constructor wraps the IOException in a RuntimeException until #340
+        assertThatThrownBy(() -> newSecureCsvWriter(csvFile, false).close())
+                .hasStackTraceContaining("The CSV file was tampered: The file is not valid UTF-8");
+    }
+
+    /**
+     * Re-encodes a file in windows-1252, as the writer wrote it with rotation disabled and a windows-1252 default
+     * charset, before it wrote in UTF-8.
+     */
+    static void reencodeInWindows1252(final File file) throws IOException {
+        final String content = new String(Files.readAllBytes(file.toPath()), UTF_8);
+        Files.write(file.toPath(), content.getBytes(Charset.forName("windows-1252")));
+    }
+
+    private File writeSecureCsvFile(final boolean rotationEnabled, final String value) throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvWriterTest");
+        logDirectory.toFile().deleteOnExit();
+        final File csvFile = new File(logDirectory.toFile(), "tamper-evident.csv");
+        try (SecureCsvWriter writer = newSecureCsvWriter(csvFile, rotationEnabled)) {
+            writer.writeEvent(getValues(SECURE_CSV_HEADER, value, "one-b", "one-c"));
+        }
+        return csvFile;
+    }
+
+    private SecureCsvWriter newSecureCsvWriter(final File csvFile, final boolean rotationEnabled) throws IOException {
+        final CsvSecurity csvSecurity = new CsvSecurity();
+        csvSecurity.setEnabled(true);
+        csvSecurity.setSignatureInterval("5 minutes");
+        final CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+        configuration.setSecurity(csvSecurity);
+        configuration.getFileRotation().setRotationEnabled(rotationEnabled);
+        configuration.setRotationRetentionCheckInterval("5 minutes");
+        return new SecureCsvWriter(csvFile, SECURE_CSV_HEADER, CsvPreference.EXCEL_PREFERENCE, configuration,
+                keyStoreHandler, random);
+    }
+
+    private CsvSecureVerifier.VerificationResult verifySecureCsvFile(final File csvFile) throws Exception {
+        String password = Base64.encode(
+                keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded());
+        KeyStoreHandler csvKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE,
+                csvFile.getPath() + ".keystore", password);
+        SecureStorage secureStorage = new KeyStoreSecureStorage(csvKeyStoreHandler,
+                keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE));
+        return new CsvSecureVerifier(csvFile, CsvPreference.EXCEL_PREFERENCE, secureStorage).verify();
+    }
+
+    @Test
+    public void shouldResumeCsvFileWithNonAsciiHeader() throws Exception {
+        final File csvFile = org.assertj.core.util.Files.newTemporaryFile();
+        final String[] headers = new String[] { "child1", NON_ASCII_VALUE };
+        final CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+        new StandardCsvWriter(csvFile, headers, CsvPreference.EXCEL_PREFERENCE, configuration).close();
+
+        // the writer reads the header of the file it resumes, and fails if it does not match
+        new StandardCsvWriter(csvFile, headers, CsvPreference.EXCEL_PREFERENCE, configuration).close();
+        assertThat(Files.readAllLines(csvFile.toPath(), UTF_8)).containsExactly("child1," + NON_ASCII_VALUE);
+    }
+
+    @Test
+    public void shouldFailToWriteEventToClosedStandardCsvWriter() throws Exception {
+        final File csvFile = org.assertj.core.util.Files.newTemporaryFile();
+        final String[] header = new String[] { "child1", "child2", "child3" };
+        final EventBufferingConfiguration bufferConfig = new EventBufferingConfiguration();
+        bufferConfig.setEnabled(false);
+        CsvSecurity csvSecurity = new CsvSecurity();
+        csvSecurity.setEnabled(false);
+        CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+        configuration.setBufferingConfiguration(bufferConfig);
+        configuration.setSecurity(csvSecurity);
+        final StandardCsvWriter writer =
+                new StandardCsvWriter(csvFile, header, CsvPreference.EXCEL_PREFERENCE, configuration);
+        writer.writeEvent(getValues(header, "one-a", "one-b", "one-c"));
+        // A closed stream stands for any write failure, such as a full disk.
+        writer.close();
+
+        // The handler retries an event whose write fails, with a new writer.
+        assertThatThrownBy(() -> writer.writeEvent(getValues(header, "two-a", "two-b", "two-c")))
+                .isInstanceOf(IOException.class);
+    }
+
+    @Test
+    public void shouldKeepSecureCsvFileVerifiableWhenWriteToClosedWriterFails() throws Exception {
+        final Path logDirectory = Files.createTempDirectory("CsvWriterTest");
+        logDirectory.toFile().deleteOnExit();
+        final File csvFile =
+                new File(logDirectory.toFile(), "shouldKeepSecureCsvFileVerifiableWhenWriteToClosedWriterFails.csv");
+        final String[] header = new String[] { "child1", "child2", "child3" };
+        EventBufferingConfiguration bufferConfig = new EventBufferingConfiguration();
+        bufferConfig.setEnabled(false);
+        CsvSecurity csvSecurity = new CsvSecurity();
+        csvSecurity.setEnabled(true);
+        csvSecurity.setSignatureInterval("3 seconds");
+        CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+        configuration.setBufferingConfiguration(bufferConfig);
+        configuration.setSecurity(csvSecurity);
+        final SecureCsvWriter writer = new SecureCsvWriter(csvFile, header, CsvPreference.EXCEL_PREFERENCE,
+                configuration, keyStoreHandler, random);
+        writer.writeEvent(getValues(header, "one-a", "one-b", "one-c"));
+        // Writes the final signature. A closed stream stands for any write failure, such as a full disk.
+        writer.close();
+
+        assertThatThrownBy(() -> writer.writeEvent(getValues(header, "two-a", "two-b", "two-c")))
+                .isInstanceOf(IOException.class);
+
+        // The key of the row that was not written is not stored, so the file still passes verification.
+        String password = Base64.encode(
+                keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded());
+        KeyStoreHandler csvKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE,
+                csvFile.getPath() + ".keystore", password);
+        SecureStorage secureStorage = new KeyStoreSecureStorage(csvKeyStoreHandler,
+                keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE));
+        CsvSecureVerifier.VerificationResult result =
+                new CsvSecureVerifier(csvFile, CsvPreference.EXCEL_PREFERENCE, secureStorage).verify();
+        assertThat(result.hasPassedVerification()).as(result.getFailureReason()).isTrue();
+    }
+
+    @Test
+    public void shouldNotResumeCsvFileWithNonAsciiHeaderNotInUtf8() throws Exception {
+        final File csvFile = org.assertj.core.util.Files.newTemporaryFile();
+        // "Grüße": letters that windows-1252 holds
+        final String[] headers = new String[] { "child1", "Grüße" };
+        // the header as the writer wrote it with a windows-1252 default charset, before it wrote in UTF-8; not
+        // re-encoded from the writer, so that the case does not depend on the charset of the writer under test
+        Files.write(csvFile.toPath(), new CsvFormatter(CsvPreference.EXCEL_PREFERENCE).formatHeader(headers)
+                .getBytes(Charset.forName("windows-1252")));
+        final CsvAuditEventHandlerConfiguration configuration = new CsvAuditEventHandlerConfiguration();
+
+        // the header is read in UTF-8, with U+FFFD in place of the bytes that are not UTF-8
+        assertThatThrownBy(() -> new StandardCsvWriter(csvFile, headers, CsvPreference.EXCEL_PREFERENCE,
+                configuration).close())
+                .isInstanceOf(IOException.class)
+                .hasMessage("Resuming an existing CSV file but the headers do not match.");
     }
 
     @Test
@@ -194,21 +461,22 @@ public class CsvWriterTest {
             writeNRows(header, writer, 12);
         }
 
-        // TODO - Commenting this test part out until the verifier can verify a rotated log file.
-        // verify the new audit file that was created after the rotation
-        //try (CsvMapReader reader = new CsvMapReader(new BufferedReader(new FileReader(csvFile)), csvPreference)) {
-        //    CsvSecureVerifier verifier = new CsvSecureVerifier(reader, SecureCsvWriterTest.TRUSTSTORE_FILENAME,
-        //            SecureCsvWriterTest.TRUSTSTORE_PASSWORD);
-        //    assertThat(verifier.verify()).isTrue();
-        //}
+        String password = Base64.encode(
+                keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded());
+
+        // Verify the new audit file that was created after the rotation.
+        KeyStoreHandler liveKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE,
+                csvFile.getPath() + ".keystore", password);
+        SecureStorage liveSecureStorage = new KeyStoreSecureStorage(liveKeyStoreHandler,
+                keyStoreHandler.readPublicKeyFromKeyStore(KeyStoreSecureStorage.ENTRY_SIGNATURE));
+        CsvSecureVerifier liveVerifier = new CsvSecureVerifier(csvFile, csvPreference, liveSecureStorage);
+        assertThat(liveVerifier.verify().hasPassedVerification()).as("File " + csvFile.getPath()).isTrue();
 
         // Verify the archived audit file.
         final TimestampFilenameFilter timestampFilenameFilter =
                 new TimestampFilenameFilter(csvFile, PREFIX, DateTimeFormat.forPattern(TIME_STAMP_FORMAT));
         final File[] files = csvFile.getParentFile().listFiles(timestampFilenameFilter);
         assertThat(files).isNotEmpty();
-        String password = Base64.encode(
-                keyStoreHandler.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD).getEncoded());
         KeyStoreHandler csvKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE,
                 files[0].getPath() + ".keystore", password);
         SecureStorage secureStorage = new KeyStoreSecureStorage(csvKeyStoreHandler,

@@ -25,6 +25,8 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.security.SignatureException;
 import java.util.Arrays;
 import java.util.Map;
@@ -92,8 +94,9 @@ class CsvSecureVerifier {
         try (ICsvMapReader csvReader = newBufferedCsvMapReader()) {
             final String[] header = csvReader.getHeader(true);
             if (header == null) {
-                // an empty file proves nothing, and a file truncated to nothing must not pass
-                return newVerificationFailureResult("The file contains no CSV header");
+                // An empty file, as one rotated before its first event, holds no row to sign: its keys tell whether
+                // rows were removed from it.
+                return verifyFinalState(true);
             }
 
             // Ensure header contains HEADER_HMAC and HEADER_SIGNATURE
@@ -121,9 +124,21 @@ class CsvSecureVerifier {
                 final String encodedSign = values.get(HEADER_SIGNATURE);
                 // The field HEADER_SIGNATURE is filled so let's check that special row
                 if (encodedSign != null) {
+                    if (!holdsOnlyTheSignature(values)) {
+                        String msg = "The signature row " + csvReader.getRowNumber() + " holds other values.";
+                        logger.trace(msg);
+                        return newVerificationFailureResult(msg);
+                    }
                     if (csvReader.getRowNumber() == 2) {
                         // Special case : this is a rotated file, do not verify the signature but store it.
                         lastSignature = Base64.decode(encodedSign);
+                        if (lastSignature == null || lastSignature.length == 0) {
+                            String msg = "The signature at row 2 is not correct.";
+                            logger.trace(msg);
+                            return newVerificationFailureResult(msg);
+                        }
+                        // Until the next event, it is the final signature of the file too.
+                        lastRowWasSigned = true;
                     } else if (!verifySignature(encodedSign)) {
                         String msg = "The signature at row " + csvReader.getRowNumber() + " is not correct.";
                         logger.trace(msg);
@@ -147,8 +162,14 @@ class CsvSecureVerifier {
                     }
                 }
             }
+        } catch (CharacterCodingException e) {
+            // such as a file written with rotation disabled before the writer wrote in UTF-8, in the platform charset
+            return newVerificationFailureResult("The file is not valid UTF-8");
         }
+        return verifyFinalState(lastRowWasSigned);
+    }
 
+    private VerificationResult verifyFinalState(boolean lastRowWasSigned) throws IOException {
         try {
             SecretKey currentKey = secureStorage.readCurrentKey();
             if (currentKey != null) {
@@ -182,7 +203,10 @@ class CsvSecureVerifier {
             fileIn.close();
             throw e;
         }
-        return new CsvMapReader(new BufferedReader(new InputStreamReader(in)), csvPreference);
+        // the writers write in UTF-8, and dataToSign() signs the UTF-8 bytes of the values; the decoder reports
+        // malformed input instead of replacing it, so that bytes that are not UTF-8 cannot pass for U+FFFD
+        return new CsvMapReader(new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8.newDecoder())),
+                csvPreference);
     }
 
     private VerificationResult newVerificationFailureResult(String msg) {
@@ -196,9 +220,11 @@ class CsvSecureVerifier {
     private boolean verifyHMAC(Map<String, String> values, String[] header) throws IOException {
         try {
             String actualHMAC = values.get(HEADER_HMAC);
-            String expectedHMAC = hmacCalculator.calculate(dataToSign(logger, values, dropExtraHeaders(header)));
-            if (!actualHMAC.equals(expectedHMAC)) {
-                logger.trace("The HMAC is not valid. Expected : {} Found : {}", expectedHMAC, actualHMAC);
+            String[] columns = dropExtraHeaders(header);
+            // A row that a previous version wrote has the HMAC of its values concatenated.
+            if (!hmacCalculator.verify(actualHMAC, dataToSign(logger, values, columns),
+                    concatenatedValues(values, columns))) {
+                logger.trace("The HMAC is not valid. Found : {}", actualHMAC);
                 return false;
             } else {
                 lastHMAC = actualHMAC;
@@ -225,6 +251,16 @@ class CsvSecureVerifier {
             logger.error(ex.getMessage(), ex);
             throw new IOException(ex);
         }
+    }
+
+    /** A signature row holds no event: its other columns, the HMAC included, are empty. */
+    private boolean holdsOnlyTheSignature(Map<String, String> values) {
+        for (Map.Entry<String, String> value : values.entrySet()) {
+            if (!HEADER_SIGNATURE.equals(value.getKey()) && value.getValue() != null && !value.getValue().isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String[] dropExtraHeaders(String... header) {

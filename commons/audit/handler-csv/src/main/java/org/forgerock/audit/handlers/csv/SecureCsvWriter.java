@@ -23,12 +23,15 @@ import static org.forgerock.audit.handlers.csv.CsvSecureConstants.HEADER_HMAC;
 import static org.forgerock.audit.handlers.csv.CsvSecureConstants.HEADER_SIGNATURE;
 import static org.forgerock.audit.handlers.csv.CsvSecureConstants.SIGNATURE_ALGORITHM;
 import static org.forgerock.audit.handlers.csv.CsvSecureUtils.dataToSign;
+import static org.forgerock.audit.handlers.csv.CsvSecureUtils.readBack;
 import static org.forgerock.util.Reject.checkNotNull;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.Writer;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SignatureException;
@@ -80,14 +83,18 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
     private HmacCalculator hmacCalculator;
     private final ScheduledExecutorService scheduler;
     private final ReentrantLock signatureLock = new ReentrantLock();
-    private final Runnable signatureTask;
     private KeyStoreSecureStorage secureStorage;
     private final Duration signatureInterval;
     private ScheduledFuture<?> scheduledSignature;
+    /** The scheduled signature task until it starts, as it signs the events written until then. */
+    private SignatureTask pendingSignature;
 
     private String lastHMAC;
     private byte[] lastSignature;
+    /** Whether events were written since the last signature. */
+    private boolean unsignedEvents = false;
     private boolean headerWritten = false;
+    private boolean closed = false;
     private final Random random;
     private File keyStoreFile;
     private String keyStorePassword;
@@ -101,10 +108,12 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
         this.keyStoreFile = CsvSecureUtils.keyStoreFile(csvFile);
         this.headers = checkNotNull(headers, "The headers can't be null.");
         this.csvFormatter = new CsvFormatter(csvPreference);
-        this.csvWriter = constructWriter(csvFile, fileAlreadyInitialized, config);
-        this.hmacCalculator = new HmacCalculator(CsvSecureConstants.HMAC_ALGORITHM);
+        // A file that cannot be opened fails here, with an IOException that the handler reports for the topic: storing
+        // its keystore would fail first, with a RuntimeException that fails the startup. The writer is constructed last.
+        new FileOutputStream(csvFile, true).close();
 
         try {
+            this.hmacCalculator = new HmacCalculator(CsvSecureConstants.HMAC_ALGORITHM);
             KeyStoreHandlerDecorator keyStoreHandlerDecorated = new KeyStoreHandlerDecorator(keyStoreHandler);
             SecretKey password = keyStoreHandlerDecorated.readSecretKeyFromKeyStore(CsvSecureConstants.ENTRY_PASSWORD);
             if (password == null) {
@@ -113,8 +122,26 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                         CsvSecureConstants.ENTRY_PASSWORD, keyStoreHandlerDecorated.getLocation()));
             }
             this.keyStorePassword = Base64.encode(password.getEncoded());
-            KeyStoreHandler hmacKeyStoreHandler =
-                    new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, keyStoreFile.getPath(), keyStorePassword);
+            final KeyStoreHandler hmacKeyStoreHandler;
+            try {
+                hmacKeyStoreHandler = new JcaKeyStoreHandler(CsvSecureConstants.KEYSTORE_TYPE, keyStoreFile.getPath(),
+                        keyStorePassword);
+            } catch (IllegalStateException e) {
+                if (e.getCause() instanceof KeyStoreException || e.getCause() instanceof NoSuchAlgorithmException) {
+                    // The JVM cannot create a keystore of this type, or find the digest that checks it: a
+                    // configuration error, not the state of the file.
+                    throw e;
+                }
+                // KeyStoreBuilder throws it for a keystore it cannot load: an empty one, left by a crash while it was
+                // stored, or one stored under another password, after a change of the Password key. Also when the
+                // file is not resumed: a topic that got no event keeps an empty file next to its keystore.
+                throw new IOException("The keystore " + keyStoreFile + " of the CSV file cannot be loaded.", e);
+            } catch (IOException | RuntimeException e) {
+                // KeyStoreBuilder cannot open a directory or a file it may not read, and KeyStore.load lets a
+                // RuntimeException, such as a ClassCastException or a NullPointerException, through for a corrupted
+                // keystore.
+                throw new IOException("The keystore " + keyStoreFile + " of the CSV file cannot be loaded.", e);
+            }
             PublicKey publicSignatureKey =
                     keyStoreHandlerDecorated.readPublicKeyFromKeyStore(CsvSecureConstants.ENTRY_SIGNATURE);
             PrivateKey privateSignatureKey =
@@ -128,21 +155,35 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                     privateSignatureKey);
             final CsvAuditEventHandlerConfiguration.CsvSecurity securityConfiguration = config.getSecurity();
             if (fileAlreadyInitialized) {
+                // A missing keystore file reads as an empty keystore. Without the keys of the file, the file cannot be
+                // verified, nor resumed: this is the state of the file, not a configuration error.
+                if (secureStorage.readInitialKey() == null) {
+                    throw new IOException("Resuming an existing CSV file but its keystore " + keyStoreFile
+                            + " is missing or holds no initial key.");
+                }
                 // Run the CsvVerifier to check that the file was not tampered.
                 CsvSecureVerifier verifier = new CsvSecureVerifier(csvFile, csvPreference, secureStorage);
-                CsvSecureVerifier.VerificationResult verificationResult = verifier.verify();
+                final CsvSecureVerifier.VerificationResult verificationResult;
+                try {
+                    verificationResult = verifier.verify();
+                } catch (RuntimeException e) {
+                    // The verifier fails this way on a row it cannot parse or decode: a row, a header or a signature
+                    // cut short by a crash while it was written, or a row edited. As CsvSecureArchiveVerifier does, it
+                    // is a file that fails verification.
+                    throw new IOException("Resuming an existing CSV file but it cannot be verified: " + csvFile, e);
+                }
                 if (!verificationResult.hasPassedVerification()) {
                     throw new IOException("The CSV file was tampered: " + verificationResult.getFailureReason());
                 }
 
-                // Assert that the 2 headers are equal.
+                // Assert that the 2 headers are equal, as the CSV reader reads them back.
                 final String[] actualHeaders = verifier.getHeaders();
                 if (actualHeaders != null) {
                     if (actualHeaders.length != headers.length) {
                         throw new IOException("Resuming an existing CSV file but the headers do not match.");
                     }
                     for (int idx = 0; idx < actualHeaders.length; idx++) {
-                        if (!actualHeaders[idx].equals(headers[idx])) {
+                        if (!readBack(actualHeaders[idx]).equals(readBack(headers[idx]))) {
                             throw new IOException("Resuming an existing CSV file but the headers do not match.");
                         }
                     }
@@ -150,7 +191,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
 
                 SecretKey currentKey = secureStorage.readCurrentKey();
                 if (currentKey == null) {
-                    throw new IllegalStateException("We are supposed to resume but there is not entry for CurrentKey.");
+                    throw new IOException("We are supposed to resume but there is not entry for CurrentKey.");
                 }
                 this.hmacCalculator.setCurrentKey(currentKey.getEncoded());
 
@@ -163,19 +204,17 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
 
             this.signatureInterval = securityConfiguration.getSignatureIntervalDuration();
             this.scheduler = Executors.newScheduledThreadPool(1);
-            this.signatureTask = new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        writeSignature(csvWriter);
-                    } catch (Exception ex) {
-                        logger.error("An error occurred while writing the signature", ex);
-                    }
-                }
-            };
         } catch (Exception e) {
+            if (e instanceof IOException) {
+                // The file cannot be resumed, or its keystore cannot be loaded: the handler reports it for the topic,
+                // and opens the other topics.
+                throw (IOException) e;
+            }
             throw new RuntimeException("Error when initializing a secure CSV writer", e);
         }
+        // Last: with rotation, the writer starts the rotation checks, and a rotation renames the file and its keystore,
+        // and writes new keys. It needs the keys read, and the file it resumes verified.
+        this.csvWriter = constructWriter(csvFile, fileAlreadyInitialized, config);
     }
 
     @Override
@@ -228,6 +267,11 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
 
     @Override
     public void close() throws IOException {
+        // The final signature flushes the writer, which throws once it is closed.
+        if (closed) {
+            return;
+        }
+        closed = true;
         try {
             signatureLock.lock();
             try {
@@ -253,9 +297,11 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
 
     private void forceWriteSignature(Writer writer) throws IOException {
         if (scheduledSignature != null && scheduledSignature.cancel(false)) {
-            // We were able to cancel it before it starts, so let's generate the signature now.
-            writeSignature(writer);
+            pendingSignature = null;
         }
+        // Sign the events written since the last signature now, whether the scheduled signature has run or not:
+        // a rotation on write can come before any signature is scheduled for the event that triggers it.
+        writeSignature(writer);
     }
 
     public void writeHeader(String... header) throws IOException {
@@ -275,7 +321,13 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
         // and the signature's row write, as the calculation uses the lastHMAC.
         signatureLock.lock();
         try {
+            if (!unsignedEvents) {
+                logger.trace("No event to sign");
+                return;
+            }
             lastSignature = secureStorage.sign(dataToSign(lastSignature, lastHMAC));
+            // Before the row is written: writing it may rotate the file, and the rotation signs the unsigned events.
+            unsignedEvents = false;
             logger.trace("Calculated new Signature");
             Map<String, String> values = singletonMap(HEADER_SIGNATURE, Base64.encode(lastSignature));
             writeEvent(writer, values);
@@ -325,9 +377,6 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
     public void writeEvent(Writer writer, Map<String, String> values) throws IOException {
         signatureLock.lock();
         try {
-            if (!headerWritten) {
-                writeHeader(headers);
-            }
             String[] extendedHeaders = addExtraColumns(headers);
 
             Map<String, String> extendedValues = new HashMap<>(values);
@@ -335,24 +384,37 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                 insertHMACSignature(extendedValues, headers);
             }
 
-            writer.write(csvFormatter.formatEvent(extendedValues, extendedHeaders));
+            String row = csvFormatter.formatEvent(extendedValues, extendedHeaders);
+            if (!headerWritten) {
+                // The header and the first event in one write, so that a rotation this write triggers archives both
+                // and signs the event; set first, as the signature that this rotation writes comes from inside it.
+                row = csvFormatter.formatHeader(extendedHeaders) + row;
+                headerWritten = true;
+            }
+            writer.write(row);
             writer.flush();
-            // Store the current key
-            secureStorage.writeCurrentKey(hmacCalculator.getCurrentKey());
+            try {
+                // Store the current key
+                secureStorage.writeCurrentKey(hmacCalculator.getCurrentKey());
+            } catch (SecureStorageException ex) {
+                // The row is in the file, and a caller that gets a failure writes it again. The keystore keeps the
+                // previous key until the next row stores the current one, and the file fails verification meanwhile.
+                logger.error("Unable to store the current HMAC key after the row is written", ex);
+            }
 
-            // Schedule a signature task only if needed.
-            if (!values.containsKey(HEADER_SIGNATURE)
-                    && (scheduledSignature == null || scheduledSignature.isDone())) {
+            // Schedule a signature task only if needed: a rotation during the write signed the event already, and
+            // a task that has started may have signed already, while it is not done yet.
+            if (unsignedEvents && pendingSignature == null) {
                 logger.trace("Triggering a new signature task to be executed in {}", signatureInterval);
                 try {
+                    final SignatureTask signatureTask = new SignatureTask();
                     scheduledSignature = scheduler.schedule(signatureTask, signatureInterval.getValue(),
                             signatureInterval.getUnit());
+                    pendingSignature = signatureTask;
                 } catch (RejectedExecutionException e) {
                     logger.error(e.getMessage(), e);
                 }
             }
-        } catch (SecureStorageException ex) {
-            throw new IOException(ex);
         } finally {
             signatureLock.unlock();
         }
@@ -362,6 +424,7 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
         try {
             lastHMAC = hmacCalculator.calculate(dataToSign(logger, values, nameMapping));
             values.put(CsvSecureConstants.HEADER_HMAC, lastHMAC);
+            unsignedEvents = true;
         } catch (SignatureException ex) {
             logger.error(ex.getMessage(), ex);
             throw new IOException(ex);
@@ -426,12 +489,40 @@ class SecureCsvWriter implements CsvWriter, RolloverLifecycleHook {
                 throw new IOException(ex);
             }
 
+            if (lastSignature == null) {
+                // Nothing was signed yet, so there is nothing to chain: the new file stays empty, as a new file does,
+                // and its header is written along with its first event.
+                headerWritten = false;
+                return;
+            }
             Writer writer = context.getWriter();
             writeHeader(writer, headers);
             // ensure the signature chaining along the files
             writeLastSignature(writer);
             // In case of low traffic we still want the headers to be written into the file
             writer.flush();
+        }
+    }
+
+    private class SignatureTask implements Runnable {
+
+        @Override
+        public void run() {
+            signatureLock.lock();
+            try {
+                // The events written from now on come after this signature, so they schedule the next one, even
+                // before this task is done. A rotation or close() may have cancelled this task while it waited for
+                // the lock, as cancel(false) does not stop a started task, and an event may have scheduled another
+                // one since: that one stays pending.
+                if (pendingSignature == this) {
+                    pendingSignature = null;
+                }
+                writeSignature(csvWriter);
+            } catch (Exception ex) {
+                logger.error("An error occurred while writing the signature", ex);
+            } finally {
+                signatureLock.unlock();
+            }
         }
     }
 }
